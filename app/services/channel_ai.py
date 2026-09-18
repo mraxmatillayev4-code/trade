@@ -22,20 +22,23 @@ _NOISE = re.compile(
     r"payment|invoice|deposit|withdraw|congratulations|tp\s*hit|sl\s*hit|"
     r"target\s*hit|closed\s*(in\s*)?(profit|loss)|breakeven|"
     r"xayrli\s*(tong|kech)|obuna|to'lov|tabriklaymiz|"
-    r"result(s)?\s*:|weekly\s*recap|follow\s*us)",
+    r"result(s)?\s*:|weekly\s*recap|follow\s*us|reklama|"
+    r"kanalga|تبلیغ|لینک|عضویت)",
     re.I,
 )
 
 _DIR_BUY = re.compile(
     r"(?:\b(?:buy|long|bull(?:ish)?|alish|sotib|покуп|лонг|купит|call|almoq|"
     r"olamiz|longga|tepaga|ko'?taril|kotariladi)\w*"
-    r"|#buy|🟢|📈|⬆️|🔼|🟩|🚀|💙|▲|△|▴)",
+    r"|#buy|🟢|📈|⬆️|🔼|🟩|🚀|💙|▲|△|▴"
+    r"|خرید|بخر|بخری|صعودی|صعود|لانگ|شراء|شرا|اشتري)",
     re.I,
 )
 _DIR_SELL = re.compile(
     r"(?:\b(?:sell|short|bear(?:ish)?|sotish|продаж|шорт|прода|put|sotmoq|"
-    r"sotamiz|shortga|pastga|tushadi|tushishi)\w*"
-    r"|#sell|🔴|📉|⬇️|🔽|🟥|🔻|💥|💔|▼|▽|▾)",
+    r"sotamiz|sotyapmiz|sotdik|sotmoqda|sotilmoqda|sotuv|shortga|pastga|tushadi|tushishi)\w*"
+    r"|#sell|🔴|📉|⬇️|🔽|🟥|🔻|💥|💔|▼|▽|▾"
+    r"|فروش|بفروش|نزولی|نزول|شورت|هبوط|بيع)",
     re.I,
 )
 
@@ -43,7 +46,7 @@ _PAIR_WORDS = re.compile(
     r"\b(xauusd|xau/usd|xauusdt|xau|gold|oltin|btc(?:usd)?|bitcoin|"
     r"eth(?:usd)?|ethereum|eurusd|gbpusd|usdjpy|usdchf|audusd|nzdusd|"
     r"silver|xag|kumush|usoil|ukoil|wti|brent|oil|neft|sol(?:ana)?|"
-    r"bnb|xrp|doge|ada|link|avax)(?:usdt?)?\b",
+    r"bnb|xrp|doge|ada|link|avax|طلا|ذهب)(?:usdt?)?\b",
     re.I,
 )
 

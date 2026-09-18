@@ -12,13 +12,15 @@ from app.core.symbols import fit_symbol, resolve_symbol
 BUY_WORDS = re.compile(
     r"(?:\b(?:buy|long|bull(?:ish)?|alish|sotib|покуп|лонг|купит|call|almoq|"
     r"olamiz|longga|tepaga|ko'?taril|kotariladi|o'sadi|oshadi)\w*"
-    r"|#buy|🟢|📈|⬆️|🔼|🟩|✅|🚀|💙|▲|△|▴)",
+    r"|#buy|🟢|📈|⬆️|🔼|🟩|✅|🚀|💙|▲|△|▴"
+    r"|خرید|بخر|بخری|صعودی|صعود|لانگ|شراء|شرا|اشتري)",
     re.IGNORECASE,
 )
 SELL_WORDS = re.compile(
     r"(?:\b(?:sell|short|bear(?:ish)?|sotish|продаж|шорт|прода|put|sotmoq|"
-    r"sotamiz|shortga|pastga|tushadi|tushishi)\w*"
-    r"|#sell|🔴|📉|⬇️|🔽|🟥|🔻|💥|💔|▼|▽|▾)",
+    r"sotamiz|sotyapmiz|sotdik|sotmoqda|sotilmoqda|sotuv|shortga|pastga|tushadi|tushishi)\w*"
+    r"|#sell|🔴|📉|⬇️|🔽|🟥|🔻|💥|💔|▼|▽|▾"
+    r"|فروش|بفروش|نزولی|نزول|شورت|هبوط|بيع)",
     re.IGNORECASE,
 )
 
@@ -65,13 +67,15 @@ BARE_ZONE = re.compile(rf"(?<![A-Za-z]){NUM}\s*[-–/]\s*{NUM}")
 # "4309 43011" / "zona 4309 4311" — bo'shliq bilan zona (admin xatosi ham)
 SPACE_ZONE = re.compile(rf"(?<![A-Za-z0-9.]){NUM}\s+{NUM}(?!\d)")
 SL_PAT = re.compile(
-    rf"\b(?:sl|s/l|stop(?:\s*-?\s*loss)?|stoploss|стоп|sloss)\s*[:=]?\s*{NUM}",
+    rf"\b(?:sl|s/l|stop(?:\s*-?\s*loss)?|stoploss|стоп|sloss|"
+    rf"حد\s*ضرر|حدضرر|استاپ|ستاپ|وقف\s*الخسار)[ \t]*[:=]?[ \t]*{NUM}",
     re.I,
 )
 # "4011 STOP" / "4319 STOP !!" — raqam OLDIN
 SL_NUM_FIRST = re.compile(
-    rf"(?<![A-Za-z0-9.]){NUM}\s*[^\w\n]{{0,8}}\s*"
-    rf"(?:stop(?:\s*-?loss)?|stoploss|s/l|sloss|стоп)\b",
+    rf"(?<![A-Za-z0-9.]){NUM}[ \t]*[^\w\n]{{0,8}}[ \t]*"
+    rf"(?:stop(?:\s*-?loss)?|stoploss|s/l|sloss|стоп|"
+    rf"حد\s*ضرر|حدضرر|استاپ|ستاپ|وقف\s*الخسار)\b",
     re.I,
 )
 # "4009 SELL"  /  "4316 - 4318 SELL"
@@ -87,7 +91,8 @@ _R_TP_LINE = re.compile(
     re.I,
 )
 TP_PAT = re.compile(
-    rf"\b(?:tp\s*1?|t/p|target|take\s*profit|maqsad|тейк)\s*[:=]?\s*{NUM}",
+    rf"\b(?:tp\s*1?|t/p|target|take\s*profit|maqsad|тейк|"
+    rf"هدف|تارگت|سود)\s*[:=]?\s*{NUM}",
     re.I,
 )
 TPN_PAT = re.compile(
@@ -112,7 +117,7 @@ DIR_AFTER = re.compile(
 GLUED = re.compile(
     r"\b(xauusd|xau/usd|gold|xagusd|silver|btc|bitcoin|eth|eurusd|gbpusd|"
     r"usdjpy|sol|oil|wti|brent)\s*"
-    r"(buy+|sell+|long|short)\b",
+    r"(buy+|sell+|long|short)(?![a-z])",
     re.I,
 )
 HASH_PAIR = re.compile(r"#([A-Za-z]{3,16})")
@@ -262,12 +267,16 @@ def _zone_bounds(raw: str) -> tuple[float | None, float | None, float | None]:
 
 _CLOSE_NOW = re.compile(
     r"(?:\btugat(?:dik|ildi|amiz|ib)?\b|\byopildi\b|\byopdik\b|\byopib\b|"
-    r"\bbekor(?:qil(?:dik|indi|amiz))?|\bcancel(?:led|ed)?\b|\bclosed?\b|"
+    r"\bbekor(?:qil(?:dik|indi|amiz))?|\bcancel(?:led|ed)?\b|"
+    r"^\s*(?:trade\s+|position\s+)?clos(?:ed|e)?\b"
+    r"(?!\s*(?:above|below|near|at|in|from|on|over|under)\b)|"
+    r"\bclos(?:ed|e)\s+(?:now|all|trades?|positions?|orders?|it)\b|"
+    r"\b(?:trade|position|order)s?\s+clos(?:ed|e)\b|"
     r"\btp\s*hit\b|\bsl\s*hit\b|\binvalid(?:ated)?\b|\boff\s*now\b|"
     r"\bsignal\s*off\b|\boff\s*qil|\bto'?xtat(?:dik|amiz)?\b|"
     r"\bclose\s*(?:now|all|trade|it)\b|\bsignalni\s*yop|"
     r"\bishlamaymiz\b|\bclosed\s*(?:in\s*)?(?:profit|loss)\b|"
-    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b)",
+    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b|بسته|اغلق)",
     re.I,
 )
 _YOPAMIZ = re.compile(r"\byopamiz\b|\byopish\b", re.I)
@@ -300,9 +309,9 @@ INV_SL = re.compile(
 )
 
 
-def _gold_level(raw: str | None) -> float | None:
-    """4 xonali oltin narx (4250), yil (2026) emas."""
-    best = None
+def _gold_levels(raw: str | None) -> list[float]:
+    """Matndagi barcha 4 xonali oltin narxlar (4250), yil (2026) emas."""
+    out: list[float] = []
     for m in re.finditer(r"(?<![A-Za-z0-9.])(\d{4}(?:[.,]\d{1,3})?)(?!\d)", raw or ""):
         v = _to_float(m.group(1))
         if not v:
@@ -310,8 +319,14 @@ def _gold_level(raw: str | None) -> float | None:
         if 2020 <= v <= 2035:
             continue
         if 1800 <= v <= 5600:
-            best = v
-    return best
+            out.append(v)
+    return out
+
+
+def _gold_level(raw: str | None) -> float | None:
+    """4 xonali oltin narx (4250), yil (2026) emas."""
+    vals = _gold_levels(raw)
+    return vals[-1] if vals else None
 
 
 def refine_idea(p: ParsedSignal | None, ref: float | None = None) -> ParsedSignal | None:
@@ -461,12 +476,22 @@ def _compact_levels(raw: str) -> tuple:
             if entry and 2020 <= entry <= 2035:
                 entry = None
     sm = SL_NUM_FIRST.search(text)
-    if sm:
+    sp = SL_PAT.search(text)
+    sl = None
+    if sp and sm:
+        # "стоп 4390" va "4011 STOP 4000 TP" — raqam TP bo'lsa, oldingi shakl olinadi
+        cand = _to_float(sp.group(1))
+        tps_now = _collect_tps(text)
+        if cand and any(abs(cand - t) < 1e-9 for t in tps_now):
+            sl = _to_float(sm.group(1))
+        else:
+            sl = cand
+    elif sp:
+        sl = _to_float(sp.group(1))
+    elif sm:
         sl = _to_float(sm.group(1))
-        if sl and 2020 <= sl <= 2035:
-            sl = None
-    if sl is None:
-        sl = _num(SL_PAT.search(text))
+    if sl and 2020 <= sl <= 2035:
+        sl = None
     return direction, entry, sl, zlo, zhi
 
 
@@ -577,7 +602,7 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
             if got:
                 symbol = got
                 break
-        if symbol is None and re.search(r"gold|xau|oltin|золот", raw, re.I):
+        if symbol is None and re.search(r"gold|xau|oltin|золот|طلا|ذهب", raw, re.I):
             symbol = "XAUUSDT"
         if symbol is None and re.search(r"\bbtc\b|bitcoin|биткоин", raw, re.I):
             symbol = "BTCUSDT"
@@ -589,7 +614,7 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
             symbol = "USOILUSDT"
     if not symbol and direction:
         zlo0, _, _ = _zone_bounds(raw)
-        if zlo0 or _gold_level(raw) or re.search(r"\b(zona|zone|gold|xau|oltin)\b", raw, re.I):
+        if zlo0 or _gold_level(raw) or re.search(r"(?:\b(zona|zone|gold|xau|oltin)\b|طلا|ذهب)", raw, re.I):
             symbol = "XAUUSDT"
     if not symbol:
         return None
@@ -626,7 +651,15 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
             if not tp:
                 tp = gold_lvl
         elif entry is None:
-            entry = gold_lvl
+            # SL/TP da ishlatilgan raqamni kirish deb olmaymiz
+            used = {float(v) for v in ([sl] + list(tps) + [tp]) if v}
+            pick = next(
+                (v for v in _gold_levels(raw) if float(v) not in used), None
+            )
+            if pick is None:
+                pick = gold_lvl
+            if not (sl and abs(float(pick) - float(sl)) < 1e-9):
+                entry = pick
     # STOP raqamini kirishga yozmasin
     if compact_entry and entry and compact_sl and abs(entry - compact_sl) < 1e-9:
         entry = compact_entry
@@ -643,6 +676,19 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
         tmp = snap_parsed(tmp, ref)
         entry, sl, tp, tps = tmp.entry, tmp.sl, tmp.tp, tmp.tps
         zlo, zhi = tmp.zone_low, tmp.zone_high
+
+    # 5 xonali xato: "XAUUSD BUY 44150-44120" -> 4415.0-4412.0
+    if (symbol or "").upper().startswith("XAU"):
+        vals = [float(v) for v in (entry, sl, tp) if v]
+        if vals and all(10000 <= v <= 99999 for v in vals):
+            scaled = [v / 10.0 for v in vals]
+            if all(1500 <= v <= 8000 for v in scaled):
+                entry = entry / 10.0 if entry else entry
+                sl = sl / 10.0 if sl else sl
+                tp = tp / 10.0 if tp else tp
+                tps = [t / 10.0 for t in tps]
+                zlo = zlo / 10.0 if zlo else zlo
+                zhi = zhi / 10.0 if zhi else zhi
 
     px = entry or sl or gold_lvl
     symbol = fit_symbol(symbol, px) or symbol

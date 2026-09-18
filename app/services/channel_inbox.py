@@ -334,6 +334,35 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                 if parsed:
                     parsed = apply_levels(parsed, blob)
 
+        # AI zaxira: lokal parser topa olmasa - kanal AI (emoji/rasm/persian/LLM)
+        if parsed is None or not (parsed.direction and parsed.symbol):
+            try:
+                from app.services import channel_ai
+
+                ai_img = image_bytes or None
+                if ai_img and (raw or "").strip() != (text or "").strip():
+                    ai_img = None  # OCR allaqachon ishlagan, ikkinchi marta o'qimaymiz
+                ai = await channel_ai.interpret_async(raw or text or None, ai_img)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CH] AI fallback: %s", exc)
+                ai = None
+            if ai is not None:
+                if parsed is None:
+                    parsed = ai
+                else:
+                    parsed.direction = parsed.direction or ai.direction
+                    parsed.symbol = parsed.symbol or ai.symbol
+                    parsed.entry = parsed.entry or ai.entry
+                    parsed.sl = parsed.sl or ai.sl
+                    if not parsed.tps:
+                        parsed.tps = list(ai.tps or [])
+                    if not parsed.tp and parsed.tps:
+                        parsed.tp = parsed.tps[0]
+                logger.info(
+                    "[CH] AI zaxira OK: %s %s entry=%s",
+                    parsed.direction, parsed.symbol, parsed.entry,
+                )
+
         is_sig = parsed is not None and parsed.direction and parsed.symbol
         if not is_sig:
             try:

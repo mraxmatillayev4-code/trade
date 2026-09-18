@@ -2,10 +2,56 @@
 from __future__ import annotations
 
 import io
+import os
+import shutil
+from pathlib import Path
 
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_TESS_DONE = False
+_TESS_EXE = ""
+_WIN_PATHS = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    r"C:\Users\Public\Tesseract-OCR\tesseract.exe",
+)
+
+
+def _setup_cmd(pytesseract) -> None:
+    """Tesseract binari qayerdaligini topib pytesseract ga ko'rsatadi.
+
+    Windows'da pytesseract o'zi topa olmaydi -> TESSERACT_CMD env yoki standart yo'l.
+    """
+    global _TESS_DONE, _TESS_EXE
+    if _TESS_DONE:
+        return
+    _TESS_DONE = True
+    try:
+        env = (os.environ.get("TESSERACT_CMD") or "").strip().strip('"')
+        if env and Path(env).exists():
+            pytesseract.pytesseract.tesseract_cmd = env
+            _TESS_EXE = env
+            logger.info("[CH-OCR] tesseract (env TESSERACT_CMD): %s", env)
+            return
+        for p in _WIN_PATHS:
+            if Path(p).exists():
+                pytesseract.pytesseract.tesseract_cmd = p
+                _TESS_EXE = p
+                logger.info("[CH-OCR] tesseract topildi: %s", p)
+                return
+        w = shutil.which("tesseract")
+        if w:
+            _TESS_EXE = w
+            logger.info("[CH-OCR] tesseract PATH ichida: %s", w)
+            return
+        logger.warning(
+            "[CH-OCR] tesseract o'rnatilmagan - rasm/skrinshot o'qilmaydi. "
+            "Windows: winget install -e --id UB-Mannheim.TesseractOCR"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH-OCR] tesseract sozlash: %s", exc)
 
 
 def ocr_image(data: bytes | None) -> str:
@@ -26,6 +72,7 @@ def ocr_image(data: bytes | None) -> str:
         texts: list[str] = []
         try:
             import pytesseract
+            _setup_cmd(pytesseract)
             for cfg in ("--psm 6", "--psm 11", "--psm 4"):
                 try:
                     t = pytesseract.image_to_string(gray, lang="eng", config=cfg) or ""
