@@ -1,0 +1,17 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[user]
+	name = comand-group
+	email = mraxmatillayev4@gmail.com
+[remote "origin"]
+	url = https://oauth2:glpat-6qMKvG690QVowgBEvcIUZmM6MQpvOjEKdTpvMnZ5bQ8.01.170r8h0x0@gitlab.com/comand-group1/sino.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+	vscode-merge-base = origin/main

@@ -1,0 +1,68 @@
+0000000000000000000000000000000000000000 1a24dc1c313d5421e5cbf232e3114430f40fb0c3 comand-group <mraxmatillayev4@gmail.com> 1787898477 +0500	commit (initial): Tuzatish: eski DB sxemasini toza qayta yaratish, WS stream URL, /health HEAD
+1a24dc1c313d5421e5cbf232e3114430f40fb0c3 1a24dc1c313d5421e5cbf232e3114430f40fb0c3 comand-group <mraxmatillayev4@gmail.com> 1787898477 +0500	Branch: renamed refs/heads/master to refs/heads/main
+1a24dc1c313d5421e5cbf232e3114430f40fb0c3 fd004c1de755916eb419638672404787825344c0 comand-group <mraxmatillayev4@gmail.com> 1787911850 +0500	commit: Tuzatish V3: DB sxema tip tekshiruvi
+fd004c1de755916eb419638672404787825344c0 56b90e784e43a92ce2fa4a414299344cb96e98fc comand-group <mraxmatillayev4@gmail.com> 1787915203 +0500	commit: Signal grafigi (rasm) olib tashlandi — faqat matn
+56b90e784e43a92ce2fa4a414299344cb96e98fc 7793ba4307c9698fcf0b34200f772a9c6c440b3b comand-group <mraxmatillayev4@gmail.com> 1787916451 +0500	commit: Klaviatura yig'ish tugmasi + rasm olib tashlandi + professional darvozalar + natija raqami
+7793ba4307c9698fcf0b34200f772a9c6c440b3b c72f8bd5bbdc1a52b4da372664e203efc5c2d19c comand-group <mraxmatillayev4@gmail.com> 1787918100 +0500	commit: Telegram Menu tugmasi (bot komandalari) qo'shildi
+c72f8bd5bbdc1a52b4da372664e203efc5c2d19c d1ba21639775f93f555c0bafe0da449306aee66a comand-group <mraxmatillayev4@gmail.com> 1788330742 +0500	commit: 4 instrument (EUR/JPY/BTC/XAU) + juda qattiq darvozalar + 1:2 RR
+d1ba21639775f93f555c0bafe0da449306aee66a 8a7157135e187dc4e7f439260396939a8cdb4d67 comand-group <mraxmatillayev4@gmail.com> 1788331487 +0500	commit: Qisqa signal kartasi + chiqish nuqtasi + Nega tafsiloti + orqaga qaytish
+8a7157135e187dc4e7f439260396939a8cdb4d67 0c9178e3607eef63047aaf32ab158d008f04260e comand-group <mraxmatillayev4@gmail.com> 1788334102 +0500	commit: Soxta pul avto-trade + balans + 3-zarar pauza + professional tugmalar
+0c9178e3607eef63047aaf32ab158d008f04260e 2e30fa8e836ac144107d63bfdf3d2ab0df7a0d80 comand-group <mraxmatillayev4@gmail.com> 1788334650 +0500	commit: professional tugmalar
+2e30fa8e836ac144107d63bfdf3d2ab0df7a0d80 66a65f22ddc17aed8b8b574a85566e4ed971d6e7 comand-group <mraxmatillayev4@gmail.com> 1788335733 +0500	commit: Har foydalanuvchi uchun alohida paper hisob/avto-trade (per-user)
+66a65f22ddc17aed8b8b574a85566e4ed971d6e7 703acccd27d21917e77405aa9ed23504d4bb9d1f comand-group <mraxmatillayev4@gmail.com> 1788336448 +0500	commit: Fix: seed per-user paper hisob
+703acccd27d21917e77405aa9ed23504d4bb9d1f b5f69de662a7437e2d038803b6a1c9d27d412d0a comand-group <mraxmatillayev4@gmail.com> 1788337138 +0500	commit: Fix: paper user_id ustunlari BigInteger (telegram ID int32 dan katta)
+b5f69de662a7437e2d038803b6a1c9d27d412d0a 430dcd18a6039d6d66387322bc642bbb922350ce comand-group <mraxmatillayev4@gmail.com> 1788337645 +0500	commit: Fix: hisobotlar kunlik/haftalik/oylik tanlovi, sozlamalar tugmalari ulandi, per-user balans
+430dcd18a6039d6d66387322bc642bbb922350ce 481b8c82a8d45c5b0f62c9b3d3092e91f12bb093 comand-group <mraxmatillayev4@gmail.com> 1788338354 +0500	commit: Sozlamalar va hisobotlar oddiy reply tugmalarga o'tkazildi (Orqaga tugmasi bilan)
+481b8c82a8d45c5b0f62c9b3d3092e91f12bb093 b6a8a207efcfc262fc85c2dd073a98f1dc0c1df9 comand-group <mraxmatillayev4@gmail.com> 1788339268 +0500	commit: Start/Orqaga ixcham menyu matni; hisobot xatoda osilmaydi
+b6a8a207efcfc262fc85c2dd073a98f1dc0c1df9 292a646dfe7f31b5e6a0dc1bd8058267c3b2988c comand-group <mraxmatillayev4@gmail.com> 1788339941 +0500	commit: Fix: o'rnatuvchi endi barcha 86 modulni yangilaydi (reports servis eskirmaydi)
+292a646dfe7f31b5e6a0dc1bd8058267c3b2988c d70c242b8562244ecc67b05947394a5eb156afbc comand-group <mraxmatillayev4@gmail.com> 1788344712 +0500	commit: Signal: 3-4 strategiya kelishuvi asosiy darvoza (aks-trend/sifat shartlari saqlandi)
+d70c242b8562244ecc67b05947394a5eb156afbc 1fba850b25433c9f4437deaf863d5fa299f4466d comand-group <mraxmatillayev4@gmail.com> 1788430093 +0500	commit: MR strategies + 4-vote high-WR gates + JPY 5m wide-stop
+1fba850b25433c9f4437deaf863d5fa299f4466d 0d11c71e2c9fc2736a8f4c61a7366ca89e37fae9 comand-group <mraxmatillayev4@gmail.com> 1788430721 +0500	commit: Reports: calendar periods (UTC+5) + date-pick report
+0d11c71e2c9fc2736a8f4c61a7366ca89e37fae9 39557a164945543d3414ed7c8ef7199364dfcd8b comand-group <mraxmatillayev4@gmail.com> 1788589500 +0500	commit: Replace JPY with Silver & Oil; enable only profitable timeframes
+39557a164945543d3414ed7c8ef7199364dfcd8b 14ad8a3cafb79855da9dae353dfab2c2ecadc845 comand-group <mraxmatillayev4@gmail.com> 1788680890 +0500	commit: Fix 4-vote gate killing signals; add Silver, Brent, NGAS, AUD (10 cells)
+14ad8a3cafb79855da9dae353dfab2c2ecadc845 1295657315cc765c4798100497866347d99655e9 comand-group <mraxmatillayev4@gmail.com> 1788681240 +0500	commit: Add market-hours filter: block traditional instruments on weekends
+1295657315cc765c4798100497866347d99655e9 10b8944cc085f6dd04c7e8118c7a0133a25e3a42 comand-group <mraxmatillayev4@gmail.com> 1788693759 +0500	commit: Fix TP2 win not counted in lifecycle; reselect best combos (all cells PF>1)
+10b8944cc085f6dd04c7e8118c7a0133a25e3a42 57cf56564bbdc2bc1e464ac50f4dde25b64296ce comand-group <mraxmatillayev4@gmail.com> 1788767287 +0500	commit: Detailed full-report inline view + back/forth navigation
+57cf56564bbdc2bc1e464ac50f4dde25b64296ce d605af4840509c421c552ab86fcf452055c53e16 comand-group <mraxmatillayev4@gmail.com> 1788778331 +0500	commit: Signal sifati oshirildi: scoring qattiqlashtirildi, registry kengaytirildi, yangi filtrlari qo'shildi
+d605af4840509c421c552ab86fcf452055c53e16 75aaabd42283e8229db75c11e38b0a4a062660f8 comand-group <mraxmatillayev4@gmail.com> 1788781458 +0500	commit: Add database cleanup scripts
+75aaabd42283e8229db75c11e38b0a4a062660f8 b86ba0f7ae959f8b78342b0d62be27f456fd8954 comand-group <mraxmatillayev4@gmail.com> 1788793238 +0500	commit: feat: add Order Flow strategy with microstructure analysis
+b86ba0f7ae959f8b78342b0d62be27f456fd8954 821459bee50e464eef1c0094582f88e2dde8fa90 comand-group <mraxmatillayev4@gmail.com> 1788795071 +0500	commit: prosto
+821459bee50e464eef1c0094582f88e2dde8fa90 d5a069da8f88e1ac01a4bfec8d2c8e93cb563ecc comand-group <mraxmatillayev4@gmail.com> 1788860692 +0500	commit: bug
+d5a069da8f88e1ac01a4bfec8d2c8e93cb563ecc 92e937940a69cfdc3c23cdc5a781f0f2b87ffe35 comand-group <mraxmatillayev4@gmail.com> 1788867224 +0500	commit: w
+92e937940a69cfdc3c23cdc5a781f0f2b87ffe35 d6c870b757b138f1d8335d2a6f8e1df44df8bc75 comand-group <mraxmatillayev4@gmail.com> 1788869613 +0500	commit: e
+d6c870b757b138f1d8335d2a6f8e1df44df8bc75 2f65c8ceb118a42653a442428744f6acc8d4eba3 comand-group <mraxmatillayev4@gmail.com> 1789044812 +0500	commit: vanihoyat
+2f65c8ceb118a42653a442428744f6acc8d4eba3 2a4e6909eb9c764f380239b6680f73fa11defffa comand-group <mraxmatillayev4@gmail.com> 1789211331 +0500	commit: fix BTC json bool, enable BTC all TF, add WaveTrend Cipher B
+2a4e6909eb9c764f380239b6680f73fa11defffa 6434b91c24a95e2c49a1c76462eb380ca93b1625 comand-group <mraxmatillayev4@gmail.com> 1789388418 +0500	commit: SINO AI learn-from-losses persist + 3R + Tashkent time
+6434b91c24a95e2c49a1c76462eb380ca93b1625 709223def619c5bacec971de74d83e3c60e9db54 comand-group <mraxmatillayev4@gmail.com> 1789389924 +0500	commit: SINO R-map 1R2R3R plus stronger AI learn persist
+709223def619c5bacec971de74d83e3c60e9db54 3732fb996b2aa61c8b7d96e81d09070c0dabaacd comand-group <mraxmatillayev4@gmail.com> 1789390905 +0500	commit: SINO 20-30 quality signals plus AI web memory
+3732fb996b2aa61c8b7d96e81d09070c0dabaacd 69205da2b09036dd250a6ee64917d50161fb806b comand-group <mraxmatillayev4@gmail.com> 1789472290 +0500	commit: SINO 20-30 quality signals plus AI web memory
+69205da2b09036dd250a6ee64917d50161fb806b 2fb26549de44c05c4a83e7445f5ae77bb18eaa4d comand-group <mraxmatillayev4@gmail.com> 1789473577 +0500	commit: SINO channels via user account AI reads text and images
+2fb26549de44c05c4a83e7445f5ae77bb18eaa4d 371f6d730ff1211f47ed01a1f68f5d540e47957e comand-group <mraxmatillayev4@gmail.com> 1789475011 +0500	commit: SINO channels via user account AI reads text and images
+371f6d730ff1211f47ed01a1f68f5d540e47957e cdf25ebc0746868dc64159cf82679665ba603563 comand-group <mraxmatillayev4@gmail.com> 1789475644 +0500	commit: SINO fix api_id swallowed by paper balance
+cdf25ebc0746868dc64159cf82679665ba603563 a04d67cf25761dbdcbdd7c587988943dbf6fd567 comand-group <mraxmatillayev4@gmail.com> 1789478026 +0500	commit: tuzatish
+a04d67cf25761dbdcbdd7c587988943dbf6fd567 2c9eef301df87eb401230864ee126ab50be12c57 comand-group <mraxmatillayev4@gmail.com> 1789478454 +0500	commit: SINO fix api_id swallowed by paper balance
+2c9eef301df87eb401230864ee126ab50be12c57 455319b45d85ee6a2fc218db38c5fce5f651589a comand-group <mraxmatillayev4@gmail.com> 1789480687 +0500	commit: SINO channel-only signals 15ch 1R-5R
+455319b45d85ee6a2fc218db38c5fce5f651589a d3fae523c12d5a9516f729739ef6565695a894da comand-group <mraxmatillayev4@gmail.com> 1789481383 +0500	commit: baza
+d3fae523c12d5a9516f729739ef6565695a894da 50725c78a75ad2db0c913a3263bd620e5e0ac43a comand-group <mraxmatillayev4@gmail.com> 1789481737 +0500	commit: go push
+50725c78a75ad2db0c913a3263bd620e5e0ac43a e19f42e85b1901d9cc2e071556fff134194a250a comand-group <mraxmatillayev4@gmail.com> 1789519437 +0500	commit: SINO AI detects all channel signal formats
+e19f42e85b1901d9cc2e071556fff134194a250a a63dfe3ca71410bfb225d9d401564f5db75a6707 comand-group <mraxmatillayev4@gmail.com> 1789552802 +0500	commit: SINO admin vs user auto-trade limit parse reports
+a63dfe3ca71410bfb225d9d401564f5db75a6707 6c3507ff4429472b0aecfcfe985186699e12cbc0 comand-group <mraxmatillayev4@gmail.com> 1789553486 +0500	commit: SINO report shows channel seen signal emas
+6c3507ff4429472b0aecfcfe985186699e12cbc0 27c6cf394b0f6b932c41a7be618d5dcabd401e49 comand-group <mraxmatillayev4@gmail.com> 1789554178 +0500	commit: SINO no EMAS spam stats saved to DB
+27c6cf394b0f6b932c41a7be618d5dcabd401e49 5be7859a8a31852b72b5a0ae7dd7ba77c153de55 comand-group <mraxmatillayev4@gmail.com> 1789554982 +0500	commit: SINO wipe channel stats once accurate per channel
+5be7859a8a31852b72b5a0ae7dd7ba77c153de55 f8a2d7e29a5beedf96fac49570bb850b8bf46247 comand-group <mraxmatillayev4@gmail.com> 1789557527 +0500	commit: SINO stitch split channel messages into one signal
+f8a2d7e29a5beedf96fac49570bb850b8bf46247 86e8efa25dac03a6ce2d820958ce208b22c184b7 comand-group <mraxmatillayev4@gmail.com> 1789564278 +0500	commit: SINO stitch split channel messages into one signal
+86e8efa25dac03a6ce2d820958ce208b22c184b7 cb775281310118273eb679611536b86fb941e407 comand-group <mraxmatillayev4@gmail.com> 1789564732 +0500	commit: SINO channel no TF means M1 watch
+cb775281310118273eb679611536b86fb941e407 bb1dfee8b2191eaa93a347b9a9882dbea4f0f14f comand-group <mraxmatillayev4@gmail.com> 1789572724 +0500	commit: SINO read all channel signal formats short zone snap
+bb1dfee8b2191eaa93a347b9a9882dbea4f0f14f 1d9208b3e941e76778adb0c1919203de40090b30 comand-group <mraxmatillayev4@gmail.com> 1789573057 +0500	commit: SINO sell now market M1 and down arrow
+1d9208b3e941e76778adb0c1919203de40090b30 9335bc9a9615228e203ddf2c76f2e7b675e5455b comand-group <mraxmatillayev4@gmail.com> 1789573925 +0500	commit: SINO v29 send channel signals and unfreeze reports
+9335bc9a9615228e203ddf2c76f2e7b675e5455b ddc8ea2e449f0599515f3dfa936b2fbbd64f6e96 comand-group <mraxmatillayev4@gmail.com> 1789575018 +0500	commit: SINO v30 hideable menu and informal gold ideas
+ddc8ea2e449f0599515f3dfa936b2fbbd64f6e96 95308dd51563bfbe9c5053f58d28cf2839b1be7a comand-group <mraxmatillayev4@gmail.com> 1789603422 +0500	commit: SINO v31 always send channel signals selll typo
+95308dd51563bfbe9c5053f58d28cf2839b1be7a a87506f60696ec1b383f05091cff1ae84fec0094 comand-group <mraxmatillayev4@gmail.com> 1789607799 +0500	commit: SINO v31 always send channel signals selll typo
+a87506f60696ec1b383f05091cff1ae84fec0094 f03b6443f0369333ea0ba9dc4b147c3b5a1200c6 comand-group <mraxmatillayev4@gmail.com> 1789611844 +0500	commit: SINO v31 always send channel signals selll typo
+f03b6443f0369333ea0ba9dc4b147c3b5a1200c6 3b65b4ef1617bddaac5de69bb892c55d8bce3453 comand-group <mraxmatillayev4@gmail.com> 1789612253 +0500	commit: SINO v35 listed-only beautiful card 3R auto
+3b65b4ef1617bddaac5de69bb892c55d8bce3453 95d964c088babad0763f55affb1e0b76067a296f comand-group <mraxmatillayev4@gmail.com> 1789636693 +0500	commit: SINO v36 single path listed poll 1R 3R
+95d964c088babad0763f55affb1e0b76067a296f e70270ac20c49aa4c2adfd8ca3309f27a170470c comand-group <mraxmatillayev4@gmail.com> 1789641136 +0500	commit: SINO v37 two lots 3R and 4R 5R
+e70270ac20c49aa4c2adfd8ca3309f27a170470c 895848fd3de970d573e42c9e6ee7f09f25b7d809 comand-group <mraxmatillayev4@gmail.com> 1789658292 +0500	commit: SINO v38 sniper parse catchup reports
+895848fd3de970d573e42c9e6ee7f09f25b7d809 f8490c9ca53c4153aad4d8c0af224332891f105b comand-group <mraxmatillayev4@gmail.com> 1789659097 +0500	commit: SINO v39 publish card paper always
+f8490c9ca53c4153aad4d8c0af224332891f105b c59f498b1f27e21648ef7210cf45bf49a364ba7d comand-group <mraxmatillayev4@gmail.com> 1789659519 +0500	commit: SINO v40 keep open lots number signals
+c59f498b1f27e21648ef7210cf45bf49a364ba7d 4b379c842ee1dacc69884bc932e8953d11d5f74e comand-group <mraxmatillayev4@gmail.com> 1789660345 +0500	commit: SINO v42 wide win loss result card
