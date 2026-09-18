@@ -50,15 +50,38 @@ if ($ok1 -and $ok2 -and $ok3) {
 }
 
 Write-Host ''
-Write-Host '===== GIT PUSH (GitLab) =====' -ForegroundColor Cyan
-git remote -v
+Write-Host '===== GIT PUSH (GitLab: comand-group/sino) =====' -ForegroundColor Cyan
+
+# Push manzili: GitLab. Agar server boshqa domen bolsa - shu qatorni ozgartiring.
+$gl_url = 'https://gitlab.com/comand-group/sino.git'
+$cur = (git config --get remote.origin.url 2>$null)
+if (-not $cur) {
+    Write-Host 'origin yoq - GitLab qoshilmoqda...' -ForegroundColor Yellow
+    git remote add origin $gl_url
+    $cur = (git config --get remote.origin.url 2>$null)
+}
+if ($cur -notlike '*comand-group/sino*') {
+    Write-Host ('origin edi: ' + $cur) -ForegroundColor Yellow
+    git remote set-url origin $gl_url
+    $cur = (git config --get remote.origin.url 2>$null)
+    Write-Host ('origin endi: ' + $gl_url) -ForegroundColor Green
+    Write-Host 'Diqqat: force push GitLab dagi shu branchni almashtiradi.' -ForegroundColor Yellow
+}
+Write-Host ('origin: ' + $cur) -ForegroundColor DarkGray
+
 git add -A
 git reset -- .env 2>$null
 git status --short
 git commit -m 'SINO v43: kanal AI zaxira + tesseract OCR + parser tuzatishlar'
-Write-Host ('Branch: ' + (git rev-parse --abbrev-ref HEAD)) -ForegroundColor DarkGray
-git push origin main --force
-git push origin master --force
+$br = (git rev-parse --abbrev-ref HEAD)
+Write-Host ('Branch: ' + $br) -ForegroundColor DarkGray
+git push origin $br --force
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'Force push rad etildi - oddiy push sinaladi...' -ForegroundColor Yellow
+    git push origin $br
+}
+if ($br -ne 'main') { git push origin ($br + ':main') --force }
+if ($br -ne 'master') { git push origin ($br + ':master') --force }
 
 Write-Host ''
 Write-Host 'TAYYOR. Endi Render panelida Manual Deploy ni bosing.' -ForegroundColor Green
@@ -68,5 +91,7 @@ if (-not $t) {
     Write-Host 'ESLATMA: tesseract topilmadi (faqat lokal Windows uchun kerak).' -ForegroundColor Yellow
     Write-Host '  winget install -e --id UB-Mannheim.TesseractOCR' -ForegroundColor Yellow
 }
+Write-Host ('Push manzili: ' + (git config --get remote.origin.url)) -ForegroundColor DarkGray
+Write-Host 'GitLab da Commits ni ochib tekshiring, keyin Render - Manual Deploy.' -ForegroundColor DarkGray
 Write-Host 'AI LLM kerak bolsa .env ichiga: AI_API_KEY=gsk_... (ixtiyoriy).' -ForegroundColor DarkGray
 Read-Host 'Yopish uchun Enter'
