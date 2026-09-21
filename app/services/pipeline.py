@@ -53,6 +53,11 @@ class AnalysisPipeline:
         ok, reason = validate_candles(df, timeframe, 20)
         if not ok:
             logger.warning("[%s %s] Data quality (kuzatish davom): %s", symbol, timeframe, reason)
+        try:
+            from app.services import live_state
+            live_state.note_check(symbol, timeframe)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[PIPELINE] live_state: %s", exc)
         await self._track_open_signals(symbol, timeframe, df)
 
     async def _track_open_signals(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:

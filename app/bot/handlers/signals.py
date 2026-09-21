@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards as kb
+from datetime import datetime, timezone
+
 from app.core.symbols import full_label
 from app.core.timeuz import format_short
 from app.database import crud
@@ -58,6 +61,131 @@ async def show_signals(callback: CallbackQuery) -> None:
 async def show_signals_message(message: Message) -> None:
     text = await _render_signals("all")
     await message.answer(text, parse_mode="HTML")
+
+
+# =========================================================================== #
+#  v61: JONLI KUZATUV — bot bozorni hozir qanday kuzatayotganini ko'rsatadi
+# =========================================================================== #
+async def _live_block(sig, positions: list, price: float | None) -> list[str]:
+    from app.engine.risk import r_multiple_for_price, r_price
+    from app.core.enums import Direction
+    head = positions[0]
+    d = str(head.direction or "BUY").upper()
+    entry = float(head.entry or 0.0)
+    sl = float(head.sl or 0.0)
+    lot1 = [q for q in positions if int(getattr(q, "stage", 0) or 0) < 10]
+    lot2 = [q for q in positions if int(getattr(q, "stage", 0) or 0) >= 10]
+    out = [
+        f"🪙 <b>{full_label(head.symbol)}</b> {d} · ⏱ {str(head.timeframe or '').upper()}"
+        f"{' · №' + str(sig.signal_no) if getattr(sig, 'signal_no', None) else ''}",
+        f"   📦 Ochiq lot: <b>{len(positions)}</b> "
+        f"(Lot1 {'✅' if lot1 else '—'} · Lot2 {'✅' if lot2 else '—'})",
+        f"   📥 Kirish: <b>{fmt_price(entry)}</b> · 🛑 Stop: <b>{fmt_price(sl)}</b>",
+    ]
+    if price is None:
+        out.append("   ⚠️ Joriy narx olinmadi (birja javob bermadi) — keyingi tsiklda qayta olinadi.")
+        return out
+    r_now = r_multiple_for_price(
+        Direction.BUY if d == "BUY" else Direction.SELL, entry, sl, price
+    )
+    out.append(f"   💹 Joriy narx: <b>{fmt_price(price)}</b> · hozirgi R: <b>{r_now:+.2f}R</b>")
+    # Darajalar: +1R/+2R/+3R — signalning o'z narxlari, +4R/+5R — R dan hisoblanadi
+    levels: dict = {}
+    for n in (1, 2, 3):
+        v = float(getattr(sig, f"tp{n}", 0.0) or 0.0)
+        if v > 0:
+            levels[n] = v
+    for n in (4, 5):
+        v = 0.0
+        for q in lot2:
+            v = float(getattr(q, "tp2" if n == 4 else "tp3", 0.0) or 0.0) or v
+        levels[n] = v or r_price(d, entry, sl, n)
+    marks = []
+    for n, label in ((-1, "STOP"), (0, "KIRISH"), (1, "himoya"), (2, "foyda"),
+                     (3, "LOT 1"), (4, "LOT 2"), (5, "LOT 2 momentum")):
+        lvl = levels.get(n) if n > 0 else r_price(d, entry, sl, n)
+        if n < 0:
+            hit = (price <= lvl) if d == "BUY" else (price >= lvl)
+        else:
+            hit = (price >= lvl) if d == "BUY" else (price <= lvl)
+        marks.append(f"      {'✅' if hit else '➖'} {n:+d}R {label}: {fmt_price(lvl)}")
+    nxt = None
+    for n in (1, 2, 3, 4, 5):
+        lvl = levels[n]
+        if (price < lvl) if d == "BUY" else (price > lvl):
+            nxt = (n, lvl)
+            break
+    out.append("   📐 <b>Darajalar</b> (narx qaysi darajada):")
+    out.extend(marks)
+    if nxt:
+        far = abs(nxt[1] - price)
+        out.append(f"   ⏭ Keyingi daraja: <b>+{nxt[0]}R</b> {fmt_price(nxt[1])} "
+                   f"— narx {fmt_price(far)} uzoqda")
+    else:
+        out.append("   🏆 Barcha darajalar bosib o'tilgan")
+    if lot2:
+        out.append(f"   🔒 Lot 2 stopi: {fmt_price(float(lot2[0].sl or 0))}")
+    return out
+
+
+@router.message(Command("kuzat"))
+async def cmd_live_track(message: Message) -> None:
+    """🔎 Bot bozorni hozir qanday kuzatayotgani: narx, R darajalar, oxirgi tekshiruv."""
+    from app.core.timeuz import format_tashkent
+    from app.database.session import async_session_factory
+    from app.paper_trading.engine import PaperEngine
+    from app.services import live_state
+
+    uid = message.from_user.id if message.from_user else None
+    engine = PaperEngine()
+    async with async_session_factory() as session:
+        opens = await engine.open_positions(session, user_id=uid)
+        sig_ids = [p.signal_id for p in opens if p.signal_id]
+        sigs = {}
+        for sid in sig_ids:
+            sig = await crud.get_signal_by_id(session, sid)
+            if sig is not None:
+                sigs[sid] = sig
+
+    if not opens:
+        chk_any = live_state.last_check_any()
+        if chk_any is not None:
+            age = max(0, int((datetime.now(timezone.utc) - chk_any).total_seconds()))
+            alive = f"⏱ Oxirgi sham tekshiruvi: {format_tashkent(chk_any)} · {age} s oldin"
+        else:
+            alive = "⏱ Hali sham qayta ishlanmadi (bot endigina ishga tushgan bo'lishi mumkin)"
+        await message.answer(
+            "🔎 <b>JONLI KUZATUV</b>\n━━━━━━━━━━━━━━━━\n"
+            "Hozir ochiq bitim yo'q — kuzatiladigan daraja ham yo'q.\n"
+            "Yangi signal kelganda shu yerga darajalar bilan chiqadi.\n\n"
+            f"{alive}\n"
+            "<i>Bot bozorni to'xtovsiz kuzatadi: har 1m sham yopilganda (WS jonli) + 15 s poll zaxira.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    by_sig: dict = {}
+    for p in opens:
+        by_sig.setdefault(p.signal_id, []).append(p)
+
+    lines = ["🔎 <b>JONLI KUZATUV</b>", "━━━━━━━━━━━━━━━━"]
+    for sid, positions in by_sig.items():
+        sig = sigs.get(sid)
+        if sig is None:
+            continue
+        price = await live_state.get_price(sig.symbol)
+        lines.extend(await _live_block(sig, positions, price))
+        chk = live_state.last_check(sig.symbol, sig.timeframe)
+        if chk is not None:
+            age = max(0, int((datetime.now(timezone.utc) - chk).total_seconds()))
+            lines.append(f"   ⏱ Oxirgi tekshiruv: {format_tashkent(chk)} · {age} s oldin")
+        if live_state.last_error():
+            lines.append(f"   ⚠️ Narx xatosi: {live_state.last_error()[:80]}")
+        lines.append("━━━━━━━━━━━━━━━━")
+
+    lines.append("<i>Kuzatuv: har 1m sham yopilganda (WS jonli) + 15 s poll zaxira. "
+                 "TP/SL urilganda natija kartasi darhol keladi.</i>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("sig:filter:"))

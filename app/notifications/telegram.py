@@ -130,6 +130,27 @@ _REASON_WORDS = {
 }
 
 
+_LOT_REASON = {
+    "TP1": "TP1 (+1R himoya)", "TP2": "TP2 (+2R)", "TP3": "TP3 (Lot 1 +3R)",
+    "TP4": "TP4 (Lot 2 +4R)", "TP5": "TP5 (Lot 2 +5R)",
+    "SL": "STOP (−1R)", "BE": "STOP (himoya)", "VAQT TUGADI": "VAQT TUGADI",
+    "BEKOR": "BEKOR QILINDI", "BREAKEVEN": "ZARARSIZ",
+}
+
+
+def lot_reason_text(reason: str | None, r: float | None = None) -> str:
+    """Lot yopilish sababi. Himoya stopida FOYDA bilan yopilgan bo'lsa — aniq yozamiz."""
+    raw = str(reason or "").strip().upper()
+    txt = _LOT_REASON.get(raw, raw or "yopilgan")
+    try:
+        rr = float(r) if r is not None else None
+    except (TypeError, ValueError):
+        rr = None
+    if raw in ("BE", "SL") and rr is not None and rr > 0.5:
+        txt = f"himoya stopi (+{rr:.2f}R)"
+    return txt
+
+
 def _reason_text(signal: Signal) -> str:
     raw = str(getattr(signal, "close_reason", "") or "").strip()
     if raw:
@@ -295,7 +316,15 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         elif v1 < -0.5 and v2 < -0.5:
             story.append("Narx <b>stopga</b> urildi — ikkala lot zarar bilan yopildi.")
         elif v1 > 0.5 and v2 > 0.5:
-            story.append("Ikkala lot ham <b>foyda</b> bilan yopildi (kanal TP lariga yetdi).")
+            if v1 >= 2.9 and v2 >= 3.9:
+                story.append("Ikkala lot ham <b>foyda</b> bilan yopildi "
+                             "(Lot 1 +3R, Lot 2 +4R/+5R darajalarida).")
+            elif v2 >= 1.5:
+                story.append("Lot 1 <b>foyda</b> bilan yopildi; Lot 2 ham foyda "
+                             "bilan (himoya stopida) yopildi.")
+            else:
+                story.append("Lot 1 kanal TP siga yetdi; Lot 2 <b>+1R himoya</b> "
+                             "stopida foyda bilan yopildi.")
         elif v1 > 0.5 >= abs(v2):
             story.append("Lot 1 <b>foyda</b> bilan yopildi; Lot 2 ni himoya stopi "
                          "(zararsiz) yopdi.")
@@ -305,9 +334,9 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
             story.append("Narx +1R himoyaga yetdi, keyin qaytdi — lotlar zararsiz yopildi.")
         else:
             story.append("Lotlar turlicha darajada yopildi (aniq R pastda).")
-        story.append(f"   Lot 1: <b>{v1:+.2f}R</b>  ({why1})")
+        story.append(f"   Lot 1: <b>{v1:+.2f}R</b>  ({lot_reason_text(why1, v1)})")
         if r2 is not None:
-            story.append(f"   Lot 2: <b>{v2:+.2f}R</b>  ({why2})")
+            story.append(f"   Lot 2: <b>{v2:+.2f}R</b>  ({lot_reason_text(why2, v2)})")
         lot1_txt, lot2_txt = f"{v1:+.2f}R", (f"{v2:+.2f}R" if r2 is not None else "—")
     elif sl_hit and hit <= 0:
         story.append("Narx <b>stop (−1R)</b> ga urildi. Ikkala lot zarar bilan yopildi.")
@@ -355,7 +384,10 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
             cash += pnl_p
             runner = int(getattr(pos, "stage", 0) or 0) >= 10
             nom = "Lot 2 (+4R/+5R)" if runner else "Lot 1 (+3R)"
-            lot_lines.append(f"   \U0001F4E6 {nom}: <b>{rr:+.2f}R</b>  ({pnl_p:+,.2f}$)")
+            lot_lines.append(
+                f"   \U0001F4E6 {nom}: <b>{rr:+.2f}R</b>  ({pnl_p:+,.2f}$) "
+                f"\u00B7 {lot_reason_text(getattr(pos, 'close_reason', ''), rr)}"
+            )
             brief.append(f"Lot{i} {rr:+.2f}R ({pnl_p:+,.2f}$)")
         # HAR IKKALA lot yoziladi; biri hali ochiq bo'lsa ham nomi turadi
         if len(rows_sorted) < 2:
@@ -380,6 +412,14 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
     jami_lines.append(f"\U0001F4CA Jami R: <b>{r:+.2f}R</b>" + (" (2 lot o'rtachasi \u2014 Lot1 + Lot2 puli / umumiy risk)" if lots_n > 1 else " (1 lot)"))
     if paper_rows:
         jami_lines.append(f"\U0001F4B5 Jami pul: <b>{cash:+,.2f}$</b>")
+        risk_sum = sum(float(getattr(q, "risk_amount", 0) or 0) for q in rows_sorted)
+        if risk_sum > 0:
+            jami_lines.append(
+                f"\u2696\uFE0F Risk (1R): <b>{risk_sum:,.2f}$</b> "
+                f"= " + " + ".join(
+                    f"{float(getattr(q, 'risk_amount', 0) or 0):,.2f}$" for q in rows_sorted
+                )
+            )
     jami_lines.append(f"\U0001F4C8 Narx bo'yicha: <b>{pnl:+.2f}%</b>")
 
     def row(ok: str, tag: str, label: str, price: float) -> str:
@@ -414,7 +454,8 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         "━━━━━━━━━━━━━━━━",
         "💵 <b>JAMI NATIJA</b>",
         *jami_lines,
-        f"📥 Kirish: <b>{fmt_price(entry)}</b>   🏁 Yopilish: <b>{fmt_price(close)}</b>",
+        f"📥 Kirish: <b>{fmt_price(entry)}</b>   "
+        f"🏁 O'rtacha chiqish: <b>{fmt_price(close)}</b>"
         "━━━━━━━━━━━━━━━━",
         "<i>Paper (virtual) natija — moliyaviy tavsiya emas.</i>",
     ]

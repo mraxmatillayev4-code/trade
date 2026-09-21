@@ -96,6 +96,12 @@ class Application:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ADMIN] hydrate: %s", exc)
         await self.candles.load_history()
+        # v61: handlerlar jonli narxni olishi uchun manbani ulaymiz (/kuzat)
+        try:
+            from app.services import live_state
+            live_state.set_price_provider(self.price_for)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[PX] live_state: %s", exc)
 
         if self.settings.bot_token:
             self.bot = Bot(
@@ -115,6 +121,7 @@ class Application:
                     BotCommand(command="menu", description="☰ Pastki menyuni ochish"),
                     BotCommand(command="akkaunt", description="👤 Telegram akkaunt ulash"),
                     BotCommand(command="natija", description="📋 Oxirgi WIN/LOSE natijalar"),
+                    BotCommand(command="kuzat", description="🔎 Jonli kuzatuv (narx va R darajalar)"),
                     BotCommand(command="hisob", description="💼 Virtual (paper) hisob"),
                     BotCommand(command="100stat", description="📊 Kanal signallari statistikasi"),
                     BotCommand(command="100fayl", description="📄 Kanallar bazasi (txt)"),

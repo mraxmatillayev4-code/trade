@@ -11,7 +11,7 @@ from aiogram.types import Message
 
 from app.core.symbols import full_label
 from app.database.session import async_session_factory
-from app.notifications.telegram import fmt_price
+from app.notifications.telegram import fmt_price, lot_reason_text
 from app.paper_trading.engine import PaperEngine
 
 router = Router(name="paper")
@@ -113,7 +113,8 @@ def _closed_block(group: list, open_pos: list) -> list[str]:
         rr_txt = f"{float(rr):+.2f}R" if rr is not None else "—"
         out.append(
             f"   📦 {_lot_name(p)}: <b>{rr_txt}</b> "
-            f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · 📌 {_reason(p)}"
+            f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · "
+            f"📌 {lot_reason_text(getattr(p, 'close_reason', ''), rr)}"
         )
     # ikkinchi lot hali ochiq bo'lsa — aytib qo'yamiz
     if len(group) == 1:
@@ -152,6 +153,12 @@ def _account_lines(acc, open_pos, closed) -> list[str]:
     if acc.paused_by_circuit:
         auto = "⏸ PAUZA (3 ketma-ket zarar)"
     wr = (acc.total_wins / acc.total_trades * 100) if acc.total_trades else 0.0
+    try:
+        from app.core.config import get_settings
+        risk_pct = float(get_settings().risk_percent or 1.0)
+    except Exception:  # noqa: BLE001
+        risk_pct = 1.0
+    risk_usd = float(acc.balance or 0) * risk_pct / 100.0
     lines = [
         "💼 <b>SIZNING VIRTUAL HISOBINGIZ</b>",
         "━━━━━━━━━━━━━━━━",
@@ -159,6 +166,8 @@ def _account_lines(acc, open_pos, closed) -> list[str]:
         f"🏦 Joriy balans: <b>${acc.balance:,.2f}</b>",
         f"{icon} Jami natija: <b>{pnl:+,.2f}$ ({pnl_pct:+.2f}%)</b>",
         f"📊 Bitimlar: {acc.total_trades} | G'alaba: {wr:.0f}%",
+        f"\u2696\uFE0F 1 signalga risk: <b>{risk_usd:,.2f}$</b> "
+        f"({risk_pct:g}% balans \u00B7 2 lotga bo'linadi)",
         f"🔴 Ketma-ket zarar: {acc.consecutive_losses}",
         f"🤖 Avto-trade: <b>{auto}</b>",
         f"📂 Ochiq bitimlar: {len(open_pos)}",
@@ -213,7 +222,8 @@ async def last_results(message: Message) -> None:
             rr_txt = ("%+.2fR" % rr) if rr is not None else "—"
             out.append(
                 f"   📦 {_lot_name(p)}: <b>{rr_txt}</b> "
-                f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · 📌 {_reason(p)}\n"
+                f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · "
+                f"📌 {lot_reason_text(getattr(p, 'close_reason', ''), rr)}\n"
                 f"        📥 {fmt_price(p.entry)} → 🏁 {fmt_price(getattr(p, 'close_price', None))}"
             )
         r_txt = f"{r_avg:+.2f}R" + (" (2 lot o'rtachasi)" if len(grp) > 1 else "")
