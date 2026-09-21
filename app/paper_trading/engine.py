@@ -128,10 +128,65 @@ class PaperEngine:
         return opened
 
     # ---------- Yopilish (bir user pozitsiyasi) ----------
+    async def _open_lots_left(self, session: AsyncSession, pos: PaperPosition) -> int:
+        """Shu SIGNAL bo'yicha ochiq qolgan lotlar (o'zidan tashqari) — v63."""
+        from sqlalchemy import func
+
+        stmt = select(func.count(PaperPosition.id)).where(
+            PaperPosition.user_id == pos.user_id,
+            PaperPosition.status == PaperStatus.OPEN.value,
+            PaperPosition.id != pos.id,
+        )
+        if getattr(pos, "signal_id", None):
+            stmt = stmt.where(PaperPosition.signal_id == pos.signal_id)
+        else:
+            stmt = stmt.where(PaperPosition.symbol == pos.symbol)
+        return int((await session.execute(stmt)).scalar() or 0)
+
+    async def trade_stats(self, session: AsyncSession, user_id: int) -> dict:
+        """v63: statistika DB dan hosil qilinadi (saqlangan hisoblagich xato bo'lsa ham to'g'ri).
+
+        Bitim = bitta SIGNAL (2 lot birga). G'alaba = bitim puli +0.05$ dan katta.
+        """
+        rows = list((await session.execute(
+            select(PaperPosition).where(PaperPosition.user_id == user_id)
+            .order_by(PaperPosition.id)
+        )).scalars().all())
+        groups: dict = {}
+        for x in rows:
+            key = getattr(x, "signal_id", None)
+            if key is None:
+                key = ("pos", x.id)
+            groups.setdefault(key, []).append(x)
+        trades = wins = losses = be = 0
+        open_cnt = 0
+        pnl = 0.0
+        for arr in groups.values():
+            cash = sum(float(getattr(x, "realized_pnl", 0) or 0) for x in arr)
+            pnl += cash
+            if any(str(getattr(x, "status", "")) == PaperStatus.OPEN.value for x in arr):
+                open_cnt += 1
+                continue
+            trades += 1
+            if cash > 0.05:
+                wins += 1
+            elif cash < -0.05:
+                losses += 1
+            else:
+                be += 1
+        return {
+            "trades": trades, "wins": wins, "losses": losses, "breakeven": be,
+            "winrate": (wins / trades * 100.0) if trades else 0.0,
+            "open_signals": open_cnt, "open_lots": len([x for x in rows
+                                                        if str(getattr(x, "status", "")) == PaperStatus.OPEN.value]),
+            "pnl": round(pnl, 4), "groups": len(groups),
+        }
+
     async def apply_fill(self, session: AsyncSession, pos: PaperPosition,
                          fill_price: float, portion: float, is_final: bool,
                          exit_price_for_remaining: float | None = None,
                          count_trade: bool = True, reason: str = "") -> float:
+        """`count_trade` — eski parametr (moslik uchun qoldi); hisob endi oxirgi lot qoidasi."""
         acc = await self.get_account(session, pos.user_id)
         pnl = 0.0
 
@@ -168,8 +223,16 @@ class PaperEngine:
             if pos.risk_amount > 0:
                 pos.r_multiple = round(pos.realized_pnl / pos.risk_amount, 3)
 
-            # ---- Per-user circuit breaker (ikkala lotni 1 bitim deb sanash mumkin) ----
-            if count_trade:
+            # ---- v63: bitim SIGNAL bo'yicha BIR MARTA sanaladi ----
+            # Ilgari faqat `count_trade` bayrog'iga bog'liq edi; ba'zi yopilish yo'llarida
+            # (TP4/TP5, muddat, flip) hisoblagich umuman oshmay qolardi — "Bitimlar: 0".
+            # Endi qoida oddiy: shu signalning OXIRGI ochiq loti yopilganda 1 marta sanaladi.
+            try:
+                left = await self._open_lots_left(session, pos)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[PAPER] ochiq lotlar sanovi: %s", exc)
+                left = 0
+            if left == 0:
                 acc.total_trades += 1
                 r = pos.r_multiple if pos.r_multiple is not None else 0.0
                 if r > 0.05:
@@ -197,6 +260,13 @@ class PaperEngine:
         pct = (pnl / float(acc.initial_balance) * 100.0) if acc.initial_balance else 0.0
         trades = int(acc.total_trades or 0)
         wins = int(acc.total_wins or 0)
+        open_signals = 0
+        try:
+            st = await self.trade_stats(session, user_id)
+            trades, wins = int(st["trades"]), int(st["wins"])
+            open_signals = int(st["open_signals"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[PAPER] trade_stats: %s", exc)
         return {
             "balance": float(acc.balance or 0),
             "initial": float(acc.initial_balance or 0),
@@ -204,6 +274,8 @@ class PaperEngine:
             "trades": trades, "wins": wins,
             "winrate": (wins / trades * 100.0) if trades else 0.0,
             "open_count": len(opens),
+            "open_signals": open_signals or len(opens),
+            "losses": max(0, trades - wins),
             "consecutive_losses": int(acc.consecutive_losses or 0),
             "paused": bool(acc.paused_by_circuit),
             "auto_trade": bool(acc.auto_trade_enabled),

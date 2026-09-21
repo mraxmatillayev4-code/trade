@@ -113,28 +113,58 @@ class Application:
             self.dp.message.middleware(AccessMiddleware())
             self.dp.callback_query.middleware(AccessMiddleware())
             self.dp.include_router(get_main_router())
-            # Telegram chap burchakdagi "Menu" tugmasi (buyruqlar menyusi)
+            # v63: Telegram "Menu" tugmasi + BARCHA commandlar (xato bo'lsa ham menyu bo'sh qolmaydi)
+            import re as _re
+
             from aiogram.types import BotCommand
+
+            _cmds = [
+                ("start", "🚀 Botni ishga tushirish"),
+                ("menu", "☰ Asosiy menyu"),
+                ("kuzat", "🔎 Jonli kuzatuv (narx, R darajalar)"),
+                ("natija", "📋 Oxirgi WIN/LOSE natijalar"),
+                ("hisob", "💼 Virtual (paper) hisob"),
+                ("akkaunt", "👤 Telegram akkaunt ulash"),
+                ("qr", "🔳 Akkauntni QR bilan ulash"),
+                ("forget", "🚪 Akkauntni uzish"),
+                ("100", "🗂 Kanallardan 100 tadan xabar yozib olish"),
+                ("100stat", "📊 Baza statistikasi (kanallar)"),
+                ("100fayl", "📄 Baza (txt fayl)"),
+                ("100ocr", "🔤 Rasmlardan yozuvni o'qish (OCR)"),
+                ("100test", "🧪 Diagnostika"),
+                ("tozalash", "🧹 Hammasini tozalash (noldan)"),
+            ]
+            _safe = [BotCommand(command=c, description=d) for c, d in _cmds
+                     if _re.fullmatch(r"[a-z0-9_]{1,32}", c)]
+            _done: list[str] = []
             try:
-                # v62: botda MAVJUD bo'lgan BARCHA commandlar menyuga qo'yiladi
-                await self.bot.set_my_commands([
-                    BotCommand(command="start", description="🚀 Botni ishga tushirish"),
-                    BotCommand(command="menu", description="☰ Pastki menyuni ochish"),
-                    BotCommand(command="kuzat", description="🔎 Jonli kuzatuv (narx va R darajalar)"),
-                    BotCommand(command="natija", description="📋 Oxirgi WIN/LOSE natijalar"),
-                    BotCommand(command="hisob", description="💼 Virtual (paper) hisob"),
-                    BotCommand(command="akkaunt", description="👤 Telegram akkaunt ulash"),
-                    BotCommand(command="qr", description="🔳 Akkauntni QR bilan ulash"),
-                    BotCommand(command="forget", description="🚪 Akkauntni uzish"),
-                    BotCommand(command="100", description="🗂 Kanallardan 100 tadan xabar yozib olish"),
-                    BotCommand(command="100stat", description="📊 Baza statistikasi (kanallar)"),
-                    BotCommand(command="100fayl", description="📄 Baza (txt fayl)"),
-                    BotCommand(command="100ocr", description="🔤 Rasmlardan yozuvni o'qish (OCR)"),
-                    BotCommand(command="100test", description="🧪 Diagnostika (OCR zanjiri)"),
-                    BotCommand(command="tozalash", description="🧹 Hammasini tozalash (noldan)"),
-                ])
+                await self.bot.set_my_commands(_safe)
+                _done = [c.command for c in _safe]
+                logger.info("[BOT] komandalar menyusi: %d ta", len(_safe))
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Bot komandalari o'rnatilmadi: %s", exc)
+                logger.warning("[BOT] komandalar to'liq o'rnatilmadi (%s) — harfdan boshlanadiganlari", exc)
+                _safe2 = [c for c in _safe if not c.command[0].isdigit()]
+                try:
+                    await self.bot.set_my_commands(_safe2)
+                    _done = [c.command for c in _safe2]
+                except Exception as exc2:  # noqa: BLE001
+                    logger.error("[BOT] komandalar o'rnatilmadi: %s", exc2)
+            # Chap pastdagi ko'k "MENU" tugmasi (aiogram: menu_button=commands)
+            try:
+                from aiogram.types import MenuButtonCommands
+                await self.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+                logger.info("[BOT] MENU tugmasi o'rnatildi")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[BOT] MENU tugmasi: %s", exc)
+            if _done:
+                try:
+                    _missed = [c for c, _ in _cmds if c not in _done]
+                    _txt = "✅ <b>Command menyusi o'rnatildi</b> (" + str(len(_done)) + " ta):\n" + ", ".join("/" + c for c in _done)
+                    if _missed:
+                        _txt += "\n⚠️ Qo'shilmadi: " + ", ".join("/" + c for c in _missed)
+                    await self.notifier.send_admin(_txt)
+                except Exception:  # noqa: BLE001
+                    pass
         else:
             logger.warning("BOT_TOKEN yo'q — Telegram bot ishlamaydi (faqat API)")
 

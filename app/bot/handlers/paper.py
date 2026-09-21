@@ -148,14 +148,21 @@ def _open_block(group: list) -> list[str]:
     return out
 
 
-def _account_lines(acc, open_pos, closed) -> list[str]:
+def _account_lines(acc, open_pos, closed, stats: dict | None = None) -> list[str]:
     pnl = acc.balance - acc.initial_balance
     pnl_pct = (pnl / acc.initial_balance * 100) if acc.initial_balance else 0.0
     icon = "🟢" if pnl >= 0 else "🔴"
     auto = "🟢 YOQILGAN" if acc.auto_trade_enabled else "🔴 O'CHIRILGAN"
     if acc.paused_by_circuit:
         auto = "⏸ PAUZA (3 ketma-ket zarar)"
-    wr = (acc.total_wins / acc.total_trades * 100) if acc.total_trades else 0.0
+    # v63: raqamlar DB dagi haqiqiy bitimlardan olinadi (hisoblagich xato bo'lsa ham to'g'ri)
+    st = stats or {}
+    trades = int(st.get("trades", acc.total_trades or 0))
+    wins = int(st.get("wins", acc.total_wins or 0))
+    losses = int(st.get("losses", max(0, trades - wins)))
+    be = int(st.get("breakeven", 0))
+    open_signals = int(st.get("open_signals", 0)) or (1 if open_pos else 0)
+    wr = (wins / trades * 100.0) if trades else 0.0
     try:
         from app.core.config import get_settings
         risk_pct = float(get_settings().risk_percent or 1.0)
@@ -168,12 +175,13 @@ def _account_lines(acc, open_pos, closed) -> list[str]:
         f"💵 Boshlang'ich balans: ${acc.initial_balance:,.2f}",
         f"🏦 Joriy balans: <b>${acc.balance:,.2f}</b>",
         f"{icon} Jami natija: <b>{pnl:+,.2f}$ ({pnl_pct:+.2f}%)</b>",
-        f"📊 Bitimlar: {acc.total_trades} | G'alaba: {wr:.0f}%",
+        f"📊 Bitimlar: <b>{trades}</b> (🏆{wins} / 💥{losses}"
+        + (f" / ⚖️{be}" if be else "") + f") | G'alaba: <b>{wr:.0f}%</b>",
         f"\u2696\uFE0F 1 signalga risk: <b>{risk_usd:,.2f}$</b> "
         f"({risk_pct:g}% balans \u00B7 2 lotga bo'linadi)",
         f"🔴 Ketma-ket zarar: {acc.consecutive_losses}",
         f"🤖 Avto-trade: <b>{auto}</b>",
-        f"📂 Ochiq bitimlar: {len(open_pos)}",
+        f"📂 Ochiq: <b>{open_signals}</b> bitim ({len(open_pos)} lot)",
         "━━━━━━━━━━━━━━━━",
         "⚠️ Bu soxta (virtual) pul — haqiqiy pul ishlatilmaydi.",
     ]
@@ -255,7 +263,8 @@ async def paper_account_message(message: Message) -> None:
         acc = await engine.get_account(session, uid)
         open_pos = await engine.open_positions(session, user_id=uid)
         closed = await engine.recent_closed(session, uid, limit=5)
-        text = "\n".join(_account_lines(acc, open_pos, closed))
+        stats = await engine.trade_stats(session, uid)
+        text = "\n".join(_account_lines(acc, open_pos, closed, stats))
     await message.answer(text, parse_mode="HTML")
 
 

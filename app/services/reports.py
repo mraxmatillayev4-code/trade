@@ -463,11 +463,19 @@ async def build_full_report(session, period: str, user_id=None, target_date=None
         if acc:
             pnl = acc.balance - acc.initial_balance
             pnl_pct = (pnl / acc.initial_balance * 100) if acc.initial_balance else 0
-            losses_acc = acc.total_trades - acc.total_wins
-            awr = (acc.total_wins / acc.total_trades * 100) if acc.total_trades else 0
+            tr, wn, ls = int(acc.total_trades or 0), int(acc.total_wins or 0), 0
+            try:
+                from app.paper_trading.engine import PaperEngine
+                st = await PaperEngine().trade_stats(session, user_id)
+                tr, wn, ls = int(st["trades"]), int(st["wins"]), int(st["losses"])
+            except Exception as exc:  # noqa: BLE001
+                ls = max(0, tr - wn)
+                logger.debug("[REPORT] trade_stats: %s", exc)
+            losses_acc = ls if ls else max(0, tr - wn)
+            awr = (wn / tr * 100) if tr else 0
             L.append(f"💵 Balans: <b>${acc.balance:,.2f}</b> / boshlang'ich ${acc.initial_balance:,.2f}")
             L.append(f"📈 Foyda: <b>{pnl:+,.2f}$ ({pnl_pct:+.1f}%)</b>")
-            L.append(f"📊 Bitimlar: {acc.total_trades} (🏆{acc.total_wins} / 💥{losses_acc}) WR {awr:.0f}%")
+            L.append(f"📊 Bitimlar: {tr} (🏆{wn} / 💥{losses_acc}) WR {awr:.0f}%")
             L.append(f"🤖 Avto-trade: {'YOQILGAN ✅' if acc.auto_trade_enabled else 'o\'chiq ❌'}")
             if acc.paused_by_circuit:
                 L.append("⛔️ Himoya: 3 ketma-ket zarar — avto-trade PAUZA qilingan!")
