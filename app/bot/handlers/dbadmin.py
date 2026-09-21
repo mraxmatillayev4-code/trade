@@ -74,6 +74,15 @@ async def cmd_db(message: Message) -> None:
         lines.append("\u2139\uFE0F Fayl katta bo'lgani uchun <code>.gz</code> qilib yuborildi "
                      "(Supabase'ga qo'yishdan oldin ochib oling).")
     try:
+        from app.database.session import async_session_factory
+        from app.services import dbbackup
+
+        async with async_session_factory() as _s:
+            _st = await dbbackup.load_state(_s)
+        lines.append(dbbackup.status_line(_st))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         await note.edit_text("\n".join(lines), parse_mode="HTML")
     except Exception:  # noqa: BLE001
         await message.answer("\n".join(lines), parse_mode="HTML")

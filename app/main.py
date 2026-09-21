@@ -34,6 +34,26 @@ from app.services.tracker import SignalTracker
 
 logger = get_logger(__name__)
 
+# v63/v76: commandlar ro'yxati — ko'k «Menu» ham, tayyor xabari ham shu yerdan oladi.
+_cmds = [
+    ("start", "🚀 Botni ishga tushirish"),
+    ("menu", "☰ Asosiy menyu"),
+    ("kuzat", "🔎 Jonli kuzatuv (narx, R darajalar)"),
+    ("natija", "📋 Oxirgi WIN/LOSE natijalar"),
+    ("hisob", "💼 Virtual (paper) hisob"),
+    ("akkaunt", "👤 Telegram akkaunt ulash"),
+    ("qr", "🔳 Akkauntni QR bilan ulash"),
+    ("forget", "🚪 Akkauntni uzish"),
+    ("100", "🗂 Kanallardan 100 tadan xabar yozib olish"),
+    ("100stat", "📊 Baza statistikasi (kanallar)"),
+    ("100fayl", "📄 Baza (txt fayl)"),
+    ("100ocr", "🔤 Rasmlardan yozuvni o'qish (OCR)"),
+    ("100test", "🧪 Diagnostika"),
+    ("tozalash", "🧹 Hammasini tozalash (noldan)"),
+    ("broker", "🏦 Broker (MT5 demo/real) ulash"),
+    ("db", "💾 /DB - bazani yuklab olish (Supabase/Neon)"),
+]
+
 
 class Application:
     def __init__(self) -> None:
@@ -118,24 +138,6 @@ class Application:
 
             from aiogram.types import BotCommand
 
-            _cmds = [
-                ("start", "🚀 Botni ishga tushirish"),
-                ("menu", "☰ Asosiy menyu"),
-                ("kuzat", "🔎 Jonli kuzatuv (narx, R darajalar)"),
-                ("natija", "📋 Oxirgi WIN/LOSE natijalar"),
-                ("hisob", "💼 Virtual (paper) hisob"),
-                ("akkaunt", "👤 Telegram akkaunt ulash"),
-                ("qr", "🔳 Akkauntni QR bilan ulash"),
-                ("forget", "🚪 Akkauntni uzish"),
-                ("100", "🗂 Kanallardan 100 tadan xabar yozib olish"),
-                ("100stat", "📊 Baza statistikasi (kanallar)"),
-                ("100fayl", "📄 Baza (txt fayl)"),
-                ("100ocr", "🔤 Rasmlardan yozuvni o'qish (OCR)"),
-                ("100test", "🧪 Diagnostika"),
-                ("tozalash", "🧹 Hammasini tozalash (noldan)"),
-                ("broker", "🏦 Broker (MT5 demo/real) ulash"),
-                ("db", "💾 /DB - bazani yuklab olish (Supabase/Neon)"),
-            ]
             # v72: Chap pastdagi KO'K «Menu» tugmasi QAYTARILDI (foydalanuvchi so'radi).
             # Faqat pastdagi (reply) klaviaturaning ichidagi «☰ Menyu» tugmasi olib
             # tashlangan edi — bu ko'k Menu klaviatura tugmasi emas, u Telegramning
@@ -162,18 +164,23 @@ class Application:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[BOT] MENU tugmasi: %s", exc)
             try:
-                _txt = ("\u2705 <b>SINO AI tayyor (v72)</b>\n"
-                        "\u2022 Chap pastdagi ko'k <b>Menu</b> tugmasi joyida (commandlar ro'yxati).\n"
-                        "\u2022 Pastdagi klaviaturadan faqat «\u2630 Menyu» olib tashlangan; "
-                        "klaviatura yashirinadigan.\n"
-                        "\u2022 Kanal o'chirish: \U0001F5D1 tugma - BITTA bosishda o'chadi "
-                        "(«\u21A9\uFE0F Qaytarish» bor).\n"
-                        "\u2022 Terminal skrinshotlari (P/L) signal emas; bir xil xabar takror ishlanmaydi.")
-                if _done:
-                    _txt += "\nCommandlar: " + ", ".join("/" + c for c in _done[:8]) + " ..."
-                await self.notifier.send_admin(_txt)
-            except Exception:  # noqa: BLE001
-                pass
+                # v76: matn versiyani local_ai dan oladi (eski «v72» yozuvi yo'q),
+                # har versiya uchun FAQAT BIR MARTA yuboriladi (har restartda emas).
+                from app.services import bootmsg
+
+                async with async_session_factory() as _s:
+                    _announce = await bootmsg.should_announce(_s)
+                if _announce:
+                    _txt = bootmsg.build_text([c.command for c in (_done or _safe)])
+                    await self.notifier.send_admin(_txt)
+                    async with async_session_factory() as _s:
+                        await bootmsg.mark(_s)
+                    logger.info("[BOT] tayyor xabari yuborildi (%s)", bootmsg.label())
+                else:
+                    logger.info("[BOT] tayyor xabari bu versiya uchun allaqachon yuborilgan (%s)",
+                                bootmsg.label())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[BOT] tayyor xabari: %s", exc)
         else:
             logger.warning("BOT_TOKEN yo'q — Telegram bot ishlamaydi (faqat API)")
 
@@ -280,6 +287,16 @@ class Application:
         self._scheduler_tasks.append(asyncio.create_task(expiry_loop(), name="expiry-sweep"))
         self._scheduler_tasks.append(asyncio.create_task(report_loop(), name="reports"))
         self._scheduler_tasks.append(asyncio.create_task(channel_watch(), name="ch-watch"))
+
+        async def db_backup_loop() -> None:
+            """v76: har 48 soatda 23:00 (Toshkent) — baza SQL zaxirasini adminga yuboradi."""
+            try:
+                from app.services import dbbackup
+                await dbbackup.loop(self.bot)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[DB-BACKUP] start: %s", exc)
+
+        self._scheduler_tasks.append(asyncio.create_task(db_backup_loop(), name="db-backup"))
         logger.info(
             "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC "
             "(%02d:00 Toshkent), muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",
