@@ -344,6 +344,22 @@ async def start_login(api_id: int, api_hash: str, phone: str,
 COOLDOWN_SECONDS = 60
 
 
+def _clear_cached_hash(client, phone: str) -> None:
+    """Telethon keshidagi eski phone_code_hash ni o'chiradi.
+
+    Keshda hash bo'lsa Telethon `send_code_request` ichida ResendCodeRequest
+    yuboradi va Telegram uni "all available options ... already used" bilan
+    rad etadi (yangi kod umuman kelmaydi). Kesh tozalansa keyingi so'rov
+    HAQIQIY yangi kod so'rovi (SendCodeRequest) bo'ladi.
+    """
+    try:
+        cache = getattr(client, "_phone_code_hash", None)
+        if isinstance(cache, dict):
+            cache.pop(phone, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def cooldown_left() -> int:
     """Kod so'rashga qolgan "sovutish" vaqti (sekund)."""
     if not _last_request_ts:
@@ -368,19 +384,31 @@ async def resend_code(force_sms: bool = False) -> tuple[str, str]:
                 "(Ketma-ket so'rov Telegramda cheklov qo'zg'atadi.)", "")
     old_hash, old_delivery = _code_hash, _delivery
     try:
+        result = None
         if force_sms:
             # Telethon force_sms ni qo'llamaydi — to'g'ridan-to'g'ri ResendCodeRequest
-            result = None
+            if _code_hash:
+                try:
+                    from telethon.tl.functions.auth import ResendCodeRequest
+                    result = await _pending(ResendCodeRequest(_phone, _code_hash))
+                    try:  # Telethon keshini ham yangilab qo'yamiz
+                        _pending._phone_code_hash[_phone] = result.phone_code_hash
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    logger.info("[TG-USER] ResendCodeRequest ishlamadi — yangi so'rov")
+                    result = None
+        if result is None:
             try:
-                from telethon.tl.functions.auth import ResendCodeRequest
-                result = await _pending(ResendCodeRequest(_phone, _code_hash))
-            except Exception:  # noqa: BLE001
-                logger.info("[TG-USER] ResendCodeRequest ishlamadi — oddiy so'rov")
-                result = None
-            if result is None:
                 result = await _pending.send_code_request(_phone)
-        else:
-            result = await _pending.send_code_request(_phone)
+            except Exception as exc:  # noqa: BLE001
+                if not _code_hash and not getattr(_pending, "_phone_code_hash", None):
+                    raise
+                # Keshdagi eski hash sabab Telegram rad etdi — keshni tozalab,
+                # HAQIQIY yangi kod so'rovi bilan oxirgi marta urinamiz.
+                logger.info("[TG-USER] kesh tozalanib yangi so'rov: %s", exc)
+                _clear_cached_hash(_pending, _phone)
+                result = await _pending.send_code_request(_phone)
         _code_hash = result.phone_code_hash or _code_hash
         _delivery = delivery_of(result)
         _last_request_ts = time.time()
