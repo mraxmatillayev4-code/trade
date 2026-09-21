@@ -285,18 +285,30 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
     if paper_rows and lot_r:
         r2 = lot_r.get("lot2")
         r1 = lot_r.get("lot1")
-        if sl_hit and hit <= 0:
-            story.append(f"Narx <b>stop</b> ga urildi — ikkala lot ham "
-                         f"<b>{r1:+.2f}R</b> / <b>{r2:+.2f}R</b> bilan yopildi.")
-        elif st == "EXPIRED":
-            story.append(f"⏳ Muddat tugadi — pozitsiya <b>bozor narxida</b> yopildi.")
+        v1 = float(r1) if r1 is not None else 0.0
+        v2 = float(r2) if r2 is not None else 0.0
+        why1 = str(getattr(paper_rows[0], "close_reason", "") or "TP")
+        why2 = str(getattr(paper_rows[-1], "close_reason", "") or "TP")
+        # HAR LOTNING HAQIQIY R si yoziladi (kanal TP si 3R dan yaqin/uzoq bo'lishi mumkin)
+        if st == "EXPIRED":
+            story.append("⏳ Muddat tugadi — pozitsiya <b>bozor narxida</b> yopildi.")
+        elif v1 < -0.5 and v2 < -0.5:
+            story.append("Narx <b>stopga</b> urildi — ikkala lot zarar bilan yopildi.")
+        elif v1 > 0.5 and v2 > 0.5:
+            story.append("Ikkala lot ham <b>foyda</b> bilan yopildi (kanal TP lariga yetdi).")
+        elif v1 > 0.5 >= abs(v2):
+            story.append("Lot 1 <b>foyda</b> bilan yopildi; Lot 2 ni himoya stopi "
+                         "(zararsiz) yopdi.")
+        elif abs(v1) <= 0.5 < v2:
+            story.append("Lot 1 zararsiz yopildi; Lot 2 <b>foyda</b> bilan yopildi.")
+        elif abs(v1) <= 0.5 and abs(v2) <= 0.5:
+            story.append("Narx +1R himoyaga yetdi, keyin qaytdi — lotlar zararsiz yopildi.")
         else:
-            story.append(f"Lot 1 <b>{r1:+.2f}R</b> da yopildi"
-                         f" ({str(getattr(paper_rows[0], 'close_reason', '') or 'TP')}).")
-            if r2 is not None:
-                story.append(f"Lot 2 <b>{r2:+.2f}R</b> da yopildi"
-                             f" ({str(getattr(paper_rows[-1], 'close_reason', '') or 'TP')}).")
-        lot1_txt, lot2_txt = f"{r1:+.2f}R", (f"{r2:+.2f}R" if r2 is not None else "—")
+            story.append("Lotlar turlicha darajada yopildi (aniq R pastda).")
+        story.append(f"   Lot 1: <b>{v1:+.2f}R</b>  ({why1})")
+        if r2 is not None:
+            story.append(f"   Lot 2: <b>{v2:+.2f}R</b>  ({why2})")
+        lot1_txt, lot2_txt = f"{v1:+.2f}R", (f"{v2:+.2f}R" if r2 is not None else "—")
     elif sl_hit and hit <= 0:
         story.append("Narx <b>stop (−1R)</b> ga urildi. Ikkala lot zarar bilan yopildi.")
         story.append("+1R himoyaga yetilmadi.")
@@ -380,7 +392,7 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         "━━━━━━━━━━━━━━━━",
         "💵 <b>JAMI NATIJA</b>",
         f"🏷 Holat: <b>{natija_icon}</b>",
-        f"📊 Jami R: <b>{r:+.2f}R</b>   (2 lot yig‘indisi)",
+        f"📊 Jami R: <b>{r:+.2f}R</b>   (2 lot o‘rtachasi — pul yuqorida)",
         f"📈 Narx bo‘yicha: <b>{pnl:+.2f}%</b>{usd}",
         f"📥 Kirish: <b>{fmt_price(entry)}</b>   🏁 Yopilish: <b>{fmt_price(close)}</b>",
         "━━━━━━━━━━━━━━━━",
@@ -491,7 +503,12 @@ class TelegramNotifier:
                 rows = list((await session.execute(stmt)).scalars().all())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[NOTIFY] paper natija: %s", exc)
-        text = format_result(signal, rows)
+        # Karta raqamlari BITTA hisob bo'yicha bo'lishi kerak: pul yig'indisi va
+        # pastdagi "Virtual hisob" bir xil foydalanuvchiniki bo'lsin (ilgari pul
+        # barcha hisoblar bo'yicha qo'shilib, hisob bilan mos kelmasdi).
+        main_uid = rows[0].user_id if rows else None
+        own = [p for p in rows if p.user_id == main_uid] if rows else []
+        text = format_result(signal, own)
         try:
             ids = list(self._settings.admin_id_list)
             if ids and rows:

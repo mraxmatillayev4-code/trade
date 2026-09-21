@@ -363,7 +363,20 @@ class SignalTracker:
             return
         if signal.r_multiple is not None and not signal.is_active:
             return
-        r = r_hint
+        # HAQIQIY natija: yopilgan lotlardan hisoblanadi (taxmin emas).
+        # Aks holda karta "ZARARSIZ +0.00R" deb yozib, pul esa +300$ ko'rsatardi.
+        r = None
+        try:
+            info = await self._paper.signal_pnl(session, signal.id)
+            if info.get("lots"):
+                r = float(info.get("r_avg") or 0.0)
+                avg_exit = info.get("avg_exit")
+                if avg_exit:
+                    exit_price = float(avg_exit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TRACKER] natija hisobi: %s", exc)
+        if r is None:
+            r = r_hint
         if r is None:
             st = str(signal.status or "")
             r = {"TP5_HIT": 4.0, "TP4_HIT": 3.5, "TP3_HIT": 3.0, "SL_HIT": -1.0,
@@ -378,8 +391,19 @@ class SignalTracker:
             SignalStatus.TP1_HIT, SignalStatus.TP2_HIT,
         ):
             status = SignalStatus.TP3_HIT if (r or 0) > 0 else SignalStatus.SL_HIT
-        risk_frac = abs(signal.entry - signal.sl) / signal.entry if signal.entry else 0.0
-        pnl_pct = round(r * risk_frac * 100, 3)
+        # Narx bo'yicha % — kirishdan HAQIQIY chiqish narxigacha
+        pnl_pct = 0.0
+        try:
+            if exit_price and signal.entry:
+                diff = float(exit_price) - float(signal.entry)
+                if str(signal.direction).upper() == "SELL":
+                    diff = -diff
+                pnl_pct = round(diff / float(signal.entry) * 100, 3)
+            else:
+                risk_frac = abs(signal.entry - signal.sl) / signal.entry if signal.entry else 0.0
+                pnl_pct = round(r * risk_frac * 100, 3)
+        except Exception:  # noqa: BLE001
+            pnl_pct = 0.0
         await crud.close_signal(
             session, signal, status=status, result=result,
             r_multiple=r, pnl_percent=pnl_pct, close_price=exit_price,

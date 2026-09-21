@@ -3,6 +3,7 @@ aiogram==3.13.1
 aiohttp>=3.10.5
 telethon>=1.36.0
 pillow>=10.4.0
+qrcode>=7.4.2   # v53: QR bilan ulash (tg://login havolasini rasm qilish)
 pytesseract>=0.3.13
 
 # === Web API ===

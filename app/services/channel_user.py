@@ -3,6 +3,12 @@
 Sessiya SystemLog(component='tg_session') da saqlanadi (yangi jadval YO'Q).
 API_ID/HASH: .env yoki SystemLog('tg_api').
 
+v53 qo'shimchasi (QR bilan ulash):
+  * Kod umuman kelmayotganda (Telegram cheklovi) akkaunt `tg://login` havola /
+    QR rasm bilan ulanadi — SMS ham, kod ham kerak emas.
+  * Token ~30 soniyada eskiradi: `qr_step()` yangi havola/QR qaytaradi.
+  * 2FA bo'lsa `qr_password()` parol bilan yakunlaydi.
+
 v52 tuzatishlari (Telegram kod yuborishni rad etganda):
   * `SendCodeUnavailableError` ("all available options ... already used") tushunarli
     o'zbekcha matnga aylantiriladi + qancha kutish kerakligi aytiladi.
@@ -20,6 +26,7 @@ v51 tuzatishlari (kod kelmayapti / akkaunt chiqib ketdi muammolari):
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import unicodedata
 
@@ -519,3 +526,145 @@ async def finish_login(code: str, password: str | None = None) -> str:
         if "expired" in low:
             return "EXPIRED"
         return f"Kirish xato: {_human_err(exc)}"
+
+
+# === v53: QR bilan ulash (kod kelmayotganda eng ishonchli yo'l) ==============
+#
+# Telegram kod yuborishni cheklab qo'yganda (SendCodeUnavailable / jim cheklov)
+# akkauntni ulashning yagona yo'li — QR:
+#   1) bot `tg://login?token=...` havola + QR rasm yuboradi;
+#   2) foydalanuvchi Telegram ilovasida havolani bosadi (yoki QR ni boshqa
+#      qurilma bilan skanerlaydi) -> Telegram "kirishni tasdiqlaysizmi?" so'raydi;
+#   3) tasdiqlansa sessiya darhol saqlanadi (SMS/kod kerak emas).
+# Token ~30 soniyada eskiradi -> `qr_step()` TimeoutError bo'lsa `recreate()`
+# qilib YANGI havola qaytaradi (Telegram Desktop ham shunday qiladi).
+
+_qr_client = None
+_qr_obj = None
+_qr_state = ""
+
+
+def _qr_png(url: str) -> bytes | None:
+    """`tg://login?...` havolani QR rasmga (PNG) aylantiradi."""
+    try:
+        import io
+
+        import qrcode  # requirements.txt da (pillow bor)
+
+        img = qrcode.make(url)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[TG-QR] QR rasm yasalmadi: %s", exc)
+        return None
+
+
+def qr_active() -> bool:
+    """QR oqimi kutilyaptimi."""
+    return _qr_obj is not None
+
+
+async def qr_cancel() -> None:
+    """QR oqimini to'xtatadi (klient uziladi)."""
+    global _qr_client, _qr_obj, _qr_state
+    client = _qr_client
+    _qr_client = None
+    _qr_obj = None
+    _qr_state = ""
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def qr_begin() -> dict:
+    """QR ulashni boshlaydi: {"err": str, "link": str, "qr": bytes|None}."""
+    global _qr_client, _qr_obj, _qr_state
+    api_id, api_hash, _sess = await credentials()
+    if not api_id or not api_hash:
+        return {"err": "api_id/api_hash yo'q. Avval /akkaunt bilan ularni kiriting.",
+                "link": "", "qr": None}
+    await qr_cancel()
+    try:
+        client = make_client("", int(api_id), api_hash)
+        await client.connect()
+        qr = await client.qr_login()
+        _qr_client, _qr_obj, _qr_state = client, qr, "wait"
+        logger.info("[TG-QR] boshlandi")
+        return {"err": "", "link": qr.url, "qr": _qr_png(qr.url)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[TG-QR] boshlanmadi: %s", exc)
+        await qr_cancel()
+        return {"err": f"QR boshlanmadi: {_human_err(exc)}", "link": "", "qr": None}
+
+
+async def _qr_finish(user) -> dict:
+    """Sessiyani saqlaydi (QR tasdig'i yoki 2FA parolidan keyin)."""
+    account = ""
+    try:
+        uname = getattr(user, "username", None)
+        account = f"@{uname}" if uname else str(getattr(user, "id", "") or "")
+    except Exception:  # noqa: BLE001
+        account = ""
+    try:
+        sess = _qr_client.session.save()
+    except Exception:  # noqa: BLE001
+        sess = ""
+    await qr_cancel()
+    if not sess:
+        return {"state": "error", "msg": "Sessiya saqlanmadi. /qr bilan qayta urinib ko'ring."}
+    await save_session(sess)
+    logger.info("[TG-QR] akkaunt ulandi: %s", account or "-")
+    return {"state": "ok", "account": account}
+
+
+async def qr_step() -> dict:
+    """Token tasdiqlanishini kutadi.
+
+    state: ok (ulandi) | new (havola eskirdi, yangisi) | password (2FA kerak) |
+           error (xato/xato matni).
+    """
+    global _qr_state
+    if _qr_obj is None or _qr_client is None:
+        return {"state": "error", "msg": "QR oqimi yo'q. /qr bilan qayta boshlang."}
+    try:
+        user = await _qr_obj.wait()
+    except asyncio.TimeoutError:
+        try:
+            await _qr_obj.recreate()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[TG-QR] yangilash: %s", exc)
+            msg = _human_err(exc)
+            await qr_cancel()
+            return {"state": "error", "msg": msg}
+        return {"state": "new", "link": _qr_obj.url, "qr": _qr_png(_qr_obj.url)}
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ == "SessionPasswordNeededError":
+            _qr_state = "password"
+            logger.info("[TG-QR] 2FA parol kerak")
+            return {"state": "password"}
+        logger.exception("[TG-QR] kutish: %s", exc)
+        msg = _human_err(exc)
+        await qr_cancel()
+        return {"state": "error", "msg": msg}
+    return await _qr_finish(user)
+
+
+async def qr_password(password: str) -> str:
+    """2FA paroli bilan QR ulashni yakunlaydi. '' = OK, '2FA_WRONG' = parol xato."""
+    if _qr_client is None:
+        return "QR oqimi yo'q. /qr bilan qayta boshlang."
+    try:
+        await _qr_client.sign_in(password=_clean_password(password))
+        me = await _qr_client.get_me()
+    except Exception as exc:  # noqa: BLE001
+        low = f"{type(exc).__name__} {exc}".lower()
+        if "password" in low or "hash value" in low:
+            logger.info("[TG-QR] 2fa parol mos kelmadi")
+            return "2FA_WRONG"
+        logger.exception("[TG-QR] 2fa: %s", exc)
+        return _human_err(exc)
+    res = await _qr_finish(me)
+    return "" if res.get("state") == "ok" else str(res.get("msg") or "Xato")

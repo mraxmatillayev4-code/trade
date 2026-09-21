@@ -220,9 +220,15 @@ class PaperEngine:
         unreal = 0.0
         risk_total = 0.0
         open_qty = 0.0
+        exit_num = 0.0
+        exit_qty = 0.0
         for pos in rows:
             realized += float(pos.realized_pnl or 0.0)
             risk_total += float(pos.risk_amount or 0.0)
+            if str(pos.status) == PaperStatus.CLOSED.value and pos.close_price:
+                q = float(pos.qty_total or 0.0)
+                exit_num += float(pos.close_price) * q
+                exit_qty += q
             if str(pos.status) == PaperStatus.OPEN.value and pos.qty_remaining > 0:
                 open_qty += float(pos.qty_remaining)
                 if mark_price is not None:
@@ -234,6 +240,8 @@ class PaperEngine:
             "lots": len(rows), "realized": realized, "unrealized": unreal,
             "total_pnl": total, "r_avg": r_avg, "open_qty": open_qty,
             "risk_total": risk_total,
+            # yopilgan lotlarning o'rtacha chiqish narxi (lot hajmiga qarab)
+            "avg_exit": (exit_num / exit_qty) if exit_qty > 0 else None,
         }
 
     # ---------- Boshqaruv ----------

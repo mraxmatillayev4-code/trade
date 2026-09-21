@@ -8,7 +8,12 @@ from datetime import datetime, timedelta, timezone
 from aiogram import F, Router
 from aiogram.filters import Command, Filter
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import select
 
 from app.bot import keyboards as kb
@@ -30,6 +35,7 @@ router = Router(name="channels")
 logger = get_logger(__name__)
 
 _BTN_AKKAUNT = {"👤 Akkaunt", "Akkaunt"}
+_QR_TTL = 30   # tg://login havolasi shuncha soniyada eskiradi
 _MENU_BTNS = _BTN_AKKAUNT | {
     "⬅️ Orqaga", "📡 Kanallar", "➕ Qo'shish", "➖ O'chirish", "🔎 Holat",
     "🔥 Signallar", "📊 Bozor", "📚 Strategiyalar", "📈 Statistika",
@@ -172,6 +178,7 @@ async def _menu_text(session, is_admin: bool) -> str:
         "Bot o'zi signal qidirmaydi. Faqat shu kanallardan oladi (matn + rasm).",
         f"👤 Telegram: {acc}",
         "Xabarda kanal nomi chiqadi. Har kanalning o'z statistikasi bor.",
+        "Kod kelmasa: /qr — QR bilan ulash (kod kerak emas).",
         "",
     ]
     if not channels:
@@ -621,10 +628,113 @@ async def account_start(message: Message, state) -> None:
         "Botni kanalga qo'shmaymiz.\n\n"
         "1) my.telegram.org → API development tools\n"
         "2) <b>api_id</b> ni yuboring (raqam, nusxa ham bo'ladi)\n\n"
+        "Kod umuman kelmasa (Telegram cheklovi): <b>/qr</b> — QR bilan ulash,\n"
+        "kod ham, SMS ham kerak bo'lmaydi.\n\n"
         "Bekor: ⬅️ Orqaga yoki /menu",
         parse_mode="HTML",
         reply_markup=kb.channels_reply(True),
     )
+
+
+def _qr_kb(link: str) -> InlineKeyboardMarkup:
+    """«Havolani ochish» tugmasi (tg://login -> Telegram o'zi tasdiqlaydi)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\U0001F449 Havolani ochish (bosing)", url=link),
+    ]])
+
+
+def _qr_caption() -> str:
+    return (
+        "\U0001F533 <b>QR bilan ulash</b> — kod kerak emas.\n\n"
+        "1) Pastdagi <b>«Havolani ochish»</b> tugmasini bosing.\n"
+        "2) Telegram «Kirishni tasdiqlaysizmi?» deb so'raydi -> <b>Tasdiqlash</b>.\n\n"
+        "Tugma ishlamasa: rasmdagi QR ni Telegram o'rnatilgan boshqa qurilma "
+        "(kompyuter/ikkinchi telefon) bilan skanerlang.\n\n"
+        f"\u23F3 Havola ~{_QR_TTL} soniyada eskiradi — eskirsa yangisini yuboraman.\n"
+        "Bekor qilish: <b>bekor</b>"
+    )
+
+
+async def _qr_send(message: Message, link: str, png) -> None:
+    caption = _qr_caption()
+    try:
+        if png:
+            await message.answer_photo(
+                BufferedInputFile(png, filename="sino_qr.png"),
+                caption=caption, parse_mode="HTML", reply_markup=_qr_kb(link),
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AKKAUNT] QR rasm yuborilmadi: %s", exc)
+    await message.answer(caption, parse_mode="HTML", reply_markup=_qr_kb(link))
+
+
+async def _login_done(message: Message) -> None:
+    """Ulanishdan keyingi umumiy yakun: kuzatuvni qayta ishga tushirib, hisobot."""
+    try:
+        from app.services.channel_watcher import restart_watcher
+        await restart_watcher()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AKKAUNT] watcher: %s", exc)
+    st = {}
+    try:
+        from app.services.channel_user import session_status
+        st = await session_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AKKAUNT] status: %s", exc)
+    await message.answer(
+        "✅ <b>Akkaunt ulandi.</b>\n"
+        f"\U0001F464 {st.get('account') or '—'} · \U0001F4E1 kanallar: {st.get('channels', 0)}\n"
+        "Kanallar kuzatilmoqda, signallar keladi.",
+        parse_mode="HTML",
+        reply_markup=kb.channels_reply(True),
+    )
+
+
+async def _qr_loop(message: Message) -> None:
+    """Havolani har eskirganda yangilab, tasdiqlanishini kutadi (max ~10 daqiqa)."""
+    from app.services.channel_user import qr_step
+    uid = message.from_user.id
+    for _ in range(20):
+        res = await qr_step()
+        state_name = res.get("state")
+        if state_name == "ok":
+            _login_tmp.pop(uid, None)
+            await _login_done(message)
+            return
+        if state_name == "password":
+            _login_tmp[uid] = {"step": "qr2fa"}
+            await message.answer(
+                "\U0001F510 <b>Ikki bosqichli parol</b> kerak (QR tasdiqlandi).\n"
+                "Telegram -> Sozlamalar -> Maxfiylik -> Two-Step Verification paroli.\n"
+                "Parolni yozib yuboring. Bekor: <b>bekor</b>",
+                parse_mode="HTML",
+            )
+            return
+        if state_name == "new":
+            await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
+            continue
+        await message.answer("⚠️ " + str(res.get("msg") or "QR xatosi"))
+        return
+    await message.answer("\u23F3 Vaqt tugadi (havolalar eskirib bo'ldi). /qr bilan qayta urinib ko'ring.")
+
+
+@router.message(Command("qr"))
+async def account_qr(message: Message, state) -> None:
+    """QR bilan ulash — Telegram kod yubormayotganda ham ishlaydi."""
+    if not _is_admin(message.from_user.id if message.from_user else None):
+        await message.answer("Faqat admin akkaunt ulaydi.")
+        return
+    from app.services.channel_user import qr_begin
+    res = await qr_begin()
+    if res.get("err"):
+        await message.answer("⚠️ " + str(res["err"]), parse_mode="HTML")
+        return
+    uid = message.from_user.id
+    await state.clear()
+    _login_tmp[uid] = {"step": "qr"}
+    await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
+    await _qr_loop(message)
 
 
 @router.message(LoginInProgress(), F.text)
@@ -750,19 +860,43 @@ async def account_wizard(message: Message, state) -> None:
                 return
             _login_tmp.pop(uid, None)
             await state.clear()
-            try:
-                from app.services.channel_watcher import restart_watcher
-                await restart_watcher()
-            except Exception:  # noqa: BLE001
-                pass
-            st2 = await session_status()
+            await _login_done(message)
+            return
+        if step == "qr":
+            from app.services.channel_user import qr_cancel
+            if t.lower().strip() in {"bekor", "orqaga", "yo'q", "cancel"}:
+                await qr_cancel()
+                _login_tmp.pop(uid, None)
+                await message.answer("QR bekor qilindi. /qr bilan qayta boshlang.")
+                return
             await message.answer(
-                "✅ <b>Akkaunt ulandi.</b>\n"
-                f"👤 {st2.get('account') or '—'} · 📡 kanallar: {st2.get('channels', 0)}\n"
-                "Kanallar kuzatilmoqda, signallar keladi.",
+                "🔳 QR kutilmoqda — yuqoridagi <b>«Havolani ochish»</b> tugmasini bosing "
+                "(yoki QR rasmni skanerlang).\nBekor qilish: <b>bekor</b>",
                 parse_mode="HTML",
-                reply_markup=kb.channels_reply(True),
             )
+            return
+        if step == "qr2fa":
+            from app.services.channel_user import qr_cancel, qr_password
+            if t.lower().strip() in {"bekor", "orqaga", "cancel"}:
+                await qr_cancel()
+                _login_tmp.pop(uid, None)
+                await message.answer("QR bekor qilindi.")
+                return
+            err = await qr_password(t)
+            if err == "2FA_WRONG":
+                await message.answer(
+                    "⚠️ Parol Telegramda mos kelmadi (katta-kichik harf muhim).\n"
+                    "Bu Two-Step Verification paroli, telefon qulfi emas.\n"
+                    "Qayta yuboring. Bekor: <b>bekor</b>",
+                    parse_mode="HTML",
+                )
+                return
+            if err:
+                await message.answer(f"⚠️ {err}")
+                return
+            _login_tmp.pop(uid, None)
+            await state.clear()
+            await _login_done(message)
             return
         if step == "2fa":
             from app.services.channel_user import finish_login, twofa_hint
@@ -784,12 +918,7 @@ async def account_wizard(message: Message, state) -> None:
                 return
             _login_tmp.pop(uid, None)
             await state.clear()
-            try:
-                from app.services.channel_watcher import restart_watcher
-                await restart_watcher()
-            except Exception:  # noqa: BLE001
-                pass
-            await message.answer("✅ Akkaunt ulandi (2FA).", reply_markup=kb.channels_reply(True))
+            await _login_done(message)
             return
     except Exception as exc:  # noqa: BLE001
         logger.exception("[AKKAUNT] %s", exc)
