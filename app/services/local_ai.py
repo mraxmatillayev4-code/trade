@@ -1,4 +1,4 @@
-"""SINO Local AI (LAI v1) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
+"""SINO Local AI (LAI v45) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
 
 Nima qiladi (hammasi mahalliy, API key kerak emas):
   1) Normalizatsiya: o'zbek/rus/ingliz/arab yozuvi, emoji, OCR xatolari (0<->O, 1<->l, 5<->S ...)
@@ -14,6 +14,8 @@ Asosiy API:
     analyze_ex(...) -> (signal | None, sabab: str, veto: bool)   # veto=True → boshqa parserlarga o'tmasin
 """
 from __future__ import annotations
+
+__version__ = "SINO-LAI-45"
 
 import difflib
 import re
@@ -113,12 +115,18 @@ def _pre(text: str) -> str:
     for i, ch in enumerate("\u2460\u2461\u2462\u2463\u2464\u2465\u2466\u2467\u2468", start=1):
         t = t.replace(ch, " tp%d " % i)
     t = _ZW.sub("", t).lower()
+    for _q in ("'", "\u2018", "\u2019", "\u02bc", "\u2032", "`", "\u00b4", "\u2035"):
+        t = t.replace(_q, "")
     t = _DASH.sub("-", t)
     t = _EMOJI.sub(r" \1 ", t)
     t = t.replace("\u00a0", " ").replace("\u202f", " ")
     # 8.000 / 4,415 -> 8000 / 4415 (raqam ichidagi minglik ajratgichi)
     t = re.sub(r"(\d)[.,](?=\d{3}(?!\d))", r"\1", t)
     t = re.sub(r"(\d),(\d)", r"\1.\2", t)          # 4415,50 -> 4415.50
+    t = re.sub(r"\b(sl|stoploss|stop|tp|tps|target|entry|kirish|limit|zona|zone|zones|zonasi|zonalari)"
+               r"(\d)(\d{3,})\b", r"\1\2 \3", t)
+    t = re.sub(r"\b(sl|stoploss|stop|tp|tps|target|maqsad|nishon|entry|kirish|limit)"
+               r"(\d{3,})\b", r"\1 \2", t)
     t = _SEP.sub(" ", t)
     t = re.sub(r"[^\w\s@#+./%:-]", " ", t, flags=re.UNICODE)
     return re.sub(r"\s+", " ", t).strip()
@@ -247,7 +255,7 @@ _BUY_STRONG = ["buy", "buying", "buys", "bay", "bai", "buyu", "buyzone", "buynow
                "longterm", "buyer", "sotibolish", "sotibolamiz", "sotiboldik", "xarid",
                "pokupka", "pokupaem", "pokupayu", "kupit", "kuplya", "kyupit",
                "\u043a\u0443\u043f\u0438\u0442\u044c"]
-_SELL_STRONG = ["sell", "selling", "sells", "seil", "seyil", "sellzone", "sellnow", "selllimit", "short",
+_SELL_STRONG = ["sell", "selling", "sells", "sel", "seil", "seyil", "sellzone", "sellnow", "selllimit", "short",
                 "shorts", "shortterm", "seller", "sotish", "sotamiz", "sotmoq",
                 "prodazha", "prodaem", "prodavat", "prodadim", "shortsell"]
 _BUY_MED = ["bullish", "bull", "kotarilish", "kotariladi", "kotarilsa", "osadi", "osish",
@@ -444,6 +452,7 @@ _UNIT_TOK = {"pip", "pips", "punkt", "punktlar", "foiz", "usd", "dollar", "dolla
 
 _ENTRY_LBL = {"entry", "entries", "enter", "kirish", "kirishlar", "kir", "zona", "zone",
               "zonasi", "zonada", "zonega", "zonaldan", "diapazon", "range", "limit",
+              "zones", "zonalari", "zonani", "zonalar", "zone",
               "buyzone", "sellzone", "order", "buylimit", "selllimit", "kirim", "idish",
               "vhod", "ot", "sichas", "hozir", "now", "at", "@", "narvon", "level", "uroven",
               "savdo", "trade", "tradezonasi", "0.5", "0.618", "50%"}
@@ -616,7 +625,13 @@ def _fix_levels(levels: dict, symbol: str, ref: float | None) -> dict:
             t2 = _repair(t2)
         if t2 and t2 not in tps:
             tps.append(t2)
-    free = [x for x in (_repair(v) for v in levels["free"]) if x]
+    free = []
+    for v in levels["free"]:
+        x = _repair(v)
+        if x is None:
+            x = _repair(_expand_short(v, anchor))
+        if x and x not in free:
+            free.append(x)
     return {"entry": entry, "zone": zone, "sl": sl, "tps": tps, "free": free}
 
 
@@ -630,6 +645,7 @@ _V_HIT = re.compile(
     r"\bhit\b\s*(✅|☑|✔)|natija(lar)?|result(s)?\b|recap|statistika|statistics|hisobot|"
     r"closed?\s*(in|at)\s*(profit|loss)|foyda\s*oldik|zarar\s*bo[`']?ldi|"
     r"take\s*profit\s*(hit|done)|target\s*(reached|hit)|bajarildi|olds?\s*✅|"
+    r"successfully|running\s*profit|all\s*tp\s*done|enjoy\s*\d|\btp\s*\d?\s*(oldi|oldik|done)\b|"
     r"signal\s*yopildi|yopildi|итог|результат|профит\s*\+)", re.I)
 # 2-daraja: pip/foyda hisobi — reja (entry+SL) bo'lsa signal bo'lishi mumkin
 _V_RESULT = re.compile(
@@ -644,7 +660,8 @@ _V_AD = re.compile(
     r"(obuna|subscribe|vip\s*(kanal|signal|guruh)|kanalimizga|kanalga\s*qo[`']?shil|qo[`']?shiling|"
     r"join\s*(now|us|vip|channel)|t\.me/|@\w+kanal|link\s*bio|reklama|reklama\s*uchun|chegirma|"
     r"to[`']?lov|payme|click\s*up|karta\s*\d|podpiska|подпис|реклам|оплата|"
-    r"kurs|dars|lesson|mentor|signallar\s*kanali|bepul\s*kurs|king\s*trader|forex\s*bo[`']?yicha\s*o[`']?qit)", re.I)
+    r"kurs|dars|lesson|mentor|signallar\s*kanali|bepul\s*kurs|king\s*trader|"
+    r"promokod|murojat|murojaat|bonus|ro\s*yxatdan\s*ot|registratsiya)", re.I)
 
 _V_GREET = re.compile(
     r"(assalomu\s*alaykum|salom\s*(do[`']?stlar|traders|hammaga)?|xayrli\s*(tong|kun|kech)|hayrli|"
@@ -655,6 +672,14 @@ _V_ANALYSIS = re.compile(
     r"(tahlil|analiz|analysis|technical\s*analysis|fundamental|prognoz\s*uchun|sabab(lari)?|"
     r"yangilik|news|kalendar|calendar|nonfarm|nfp|fomc|cpi\s*chiqadi|"
     r"кak\s*torg|dars|o[`']?qitish|bilmaganlar\s*uchun|maqola|statya)", re.I)
+
+_SOFT_COMMENT = re.compile(
+    r"\b(boladi|kere|kerak|qilsak|qziqsak|qzsak|fokus|fokusda|oqad|oqadi|oqib|oqdi|"
+    r"boshladik|boslaymiz|boshlimiz|kotamiz|kutamiz|kuzatamiz)\b", re.I)
+
+_V_WARN = re.compile(
+    r"\b(fake|feyk|aldan|aldanib|zagon|pul\s*ko\s*paytir|kopaytirib\s*ber|"
+    r"ishonib\s*qolmang|tarqating)\b", re.I)
 
 _EDU_RULE = re.compile(
     r"(sl\s*ga\s*tegsa|sl\s*tegsa|bekor\s*bo[`']?ladi|kutamiz|kutib\s*turamiz|kuzatamiz|"
@@ -669,6 +694,10 @@ def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     Kuchli "natija" belgilari reja bo'lmasa har doim veto qiladi.
     """
     t = text or ""
+    if _V_WARN.search(t):
+        return "firibgarlik ogohlantirishi/reklama"
+    if _SOFT_COMMENT.search(t) and not has_plan:
+        return "izoh/tahlil posti"
     if _V_HIT.search(t):
         return "natija/hisobot posti"
     if _V_RESULT.search(t) and not (has_plan and strong_dir):
@@ -722,6 +751,23 @@ def _timeframe(toks: list[str], raw: str) -> tuple[str, bool]:
 
 _SEEN: dict[tuple, tuple[float, str]] = {}
 
+# Kontekst: oxirgi muvaffaqiyatli signaldagi juftlik va narx (qisqa yozuvlarni to'ldirish uchun)
+_CTX: dict = {"sym": "", "px": 0.0, "ts": 0.0}
+_CTX_TTL = 7200.0  # 2 soat
+
+
+def _ctx(now: float | None = None) -> tuple[str, float | None]:
+    now = now or time.time()
+    if not _CTX["sym"] or now - _CTX["ts"] > _CTX_TTL:
+        return "", None
+    return _CTX["sym"], (_CTX["px"] or None)
+
+
+def _ctx_set(symbol: str, px: float | None) -> None:
+    _CTX["sym"] = symbol or ""
+    _CTX["px"] = float(px or 0.0)
+    _CTX["ts"] = time.time()
+
 
 def _is_dup(symbol: str, direction: str, text: str, now: float) -> bool:
     key = (symbol, direction)
@@ -758,6 +804,9 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     if not toks:
         return None, "matn bo'sh", False
 
+    hint_sym, hint_px = _ctx()
+    if ref is None and hint_px:
+        ref = hint_px
     levels_raw = _collect_levels(toks, ref)
     syms = _find_symbols(toks, raw)
     symbol = syms[0] if syms else None
@@ -773,6 +822,15 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
                 break
     if symbol is None and has_image and (direction or levels_raw["entry"] or levels_raw["free"]):
         symbol = "XAUUSDT"
+    if (symbol is None and ref and direction
+            and (levels_raw["free"] or levels_raw["entry"] or levels_raw["sl"])):
+        # narx ankeri bo'yicha aktiv (masalan, 4360 -> oltin)
+        if _GOLDISH[0] <= float(ref) <= _GOLDISH[1]:
+            symbol = "XAUUSDT"
+    if symbol is None and hint_sym:
+        # kanalning oxirgi juftligi (qisqa yozuvlar: "57-61 buy otkat")
+        if direction and (levels_raw["free"] or levels_raw["entry"] or levels_raw["sl"]):
+            symbol = hint_sym
     if symbol is None:
         return None, "juftlik/aktiv ko'rinmadi", False
 
@@ -862,6 +920,11 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
         raw=raw[:800], tf_explicit=tf_ex,
         zone_low=(zone[0] if zone else None), zone_high=(zone[1] if zone else None),
     )
+    try:
+        _ctx_set(symbol, entry or (sum(tps) / len(tps) if tps else None)
+                 or (zone[0] if zone else None) or sl)
+    except Exception:  # noqa: BLE001
+        pass
     reason = (f"SIGNAL {direction} {symbol} ball={score:.1f} entry={entry} sl={sl} "
               f"tp={tps[:4]} zona={zone}")
     logger.info("[LAI] %s | %s", reason, body[:90])
