@@ -130,7 +130,11 @@ def r_price(direction: Direction | str, entry: float, sl: float, n: int) -> floa
 
 
 def format_r_map(entry: float, sl: float, tp1: float, tp2: float, tp3: float) -> str:
-    """2 lot: Lot1 +3R, Lot2 +4R/+5R."""
+    """2 lot: Lot1 +3R, Lot2 +4R/+5R.
+
+    v65: TP1/2/3 kanal postidan olingan bo'lsa (R ga to'g'ri kelmasa) — yorliqda
+    HAQIQIY R ko'rsatiladi («+6.4R TP1 (kanal)»), aks holda «+1R HIMOYA» qoladi.
+    """
     m = build_r_map(entry, sl, tp1, tp2, tp3)
     buy = entry > sl
     d = Direction.BUY if buy else Direction.SELL
@@ -149,14 +153,24 @@ def format_r_map(entry: float, sl: float, tp1: float, tp2: float, tp3: float) ->
             f"  ({sign}{p:.2f}%)"
         )
 
+    def std(n: int, name: str, price: float) -> tuple[str, str]:
+        rv = r_multiple_for_price(d, entry, sl, price)
+        if abs(rv - n) <= 0.2:
+            return (f"+{n}R", name)
+        return (f"+{rv:.1f}R", f"TP{n} (kanal)")
+
+    t1_tag, t1_lbl = std(1, "HIMOYA", m.tp1)
+    t2_tag, t2_lbl = std(2, "FOYDA", m.tp2)
+    t3_tag, t3_lbl = std(3, "LOT 1 yopiladi", m.tp3)
+
     return "\n".join([
         "📐 <b>R XARITASI</b> — 2 lot (riskka qarab):",
         f"   1R masofa: <b>{format_price(m.risk)}</b>  (±{m.risk_pct:.2f}%)",
         row("🛑", "−1R", "STOP (2 lot)", m.sl, m.sl_pct),
         row("📍", " 0R", "KIRISH", m.entry, 0.0),
-        row("✅", "+1R", "HIMOYA", m.tp1, m.tp1_pct),
-        row("🎯", "+2R", "FOYDA", m.tp2, m.tp2_pct),
-        row("🏁", "+3R", "LOT 1 yopiladi", m.tp3, m.tp3_pct),
+        row("✅", t1_tag, t1_lbl, m.tp1, m.tp1_pct),
+        row("🎯", t2_tag, t2_lbl, m.tp2, m.tp2_pct),
+        row("🏁", t3_tag, t3_lbl, m.tp3, m.tp3_pct),
         row("🚀", "+4R", "LOT 2", tp4, pct(tp4)),
         row("💎", "+5R", "LOT 2 (momentum)", tp5, pct(tp5)),
     ])

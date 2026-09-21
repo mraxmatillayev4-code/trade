@@ -99,7 +99,8 @@ async def wipe_all(*, drop_channels: bool = True) -> dict:
 
 
 def report_text(res: dict) -> str:
-    """Tozalash hisoboti (HTML)."""
+    """Tozalash hisoboti (HTML). Kanallar saqlangan bo'lsa — shuni aytadi (v65)."""
+    ch_dropped = "kanal_yozuvi" in res
     lines = [
         "\U0001F9F9 <b>TOZALANDI — bot toza holatda.</b>",
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
@@ -107,10 +108,18 @@ def report_text(res: dict) -> str:
         f"\U0001F4CB tasdiqlar: {int(res.get('signal_confirmations') or 0)}",
         f"\U0001F4BC paper pozitsiya: {int(res.get('paper_positions') or 0)}, hisob: {int(res.get('paper_accounts') or 0)}",
         f"\U0001F4C8 statistika qatorlari: {int(res.get('statistika') or 0)} (kanal statistikasi ham)",
-        f"\U0001F4E1 kanallar ro'yxati: <b>{int(res.get('kanal_yozuvi') or 0)}</b> yozuv tozalandi",
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-        "\u2705 Akkaunt ulanishi SAQLANDI (kuzatuvchi qayta ishga tushdi).",
-        "\u27A1\uFE0F Endi kanallarni o'zingiz qo'shing: \U0001F4E1 Kanallar \u2192 \u2795 Qo'shish.",
-        "\U0001F195 Eski (tarixiy) xabarlar O'QILMAYDI — faqat YANGI postlar signal bo'ladi.",
     ]
+    if ch_dropped:
+        lines.append(
+            f"\U0001F4E1 kanallar ro'yxati: <b>{int(res.get('kanal_yozuvi') or 0)}</b> yozuv tozalandi"
+        )
+    else:
+        lines.append("\U0001F4E1 ulangan kanallar: <b>SAQLANDI</b> — o'chirilmadi \u2705")
+    lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    lines.append("\u2705 Akkaunt ulanishi SAQLANDI (kuzatuvchi qayta ishga tushdi).")
+    if ch_dropped:
+        lines.append("\u27A1\uFE0F Endi kanallarni o'zingiz qo'shing: \U0001F4E1 Kanallar \u2192 \u2795 Qo'shish.")
+    else:
+        lines.append("\u27A1\uFE0F Kanallar joyida — bot ularni kuzatishda davom etadi.")
+    lines.append("\U0001F195 Eski (tarixiy) xabarlar O'QILMAYDI — faqat YANGI postlar signal bo'ladi.")
     return "\n".join(lines)

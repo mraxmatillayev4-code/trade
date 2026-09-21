@@ -7,9 +7,9 @@ EMAS chatga yuborilmaydi.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings, get_settings
@@ -23,6 +23,7 @@ from app.engine.risk import calculate_levels, r_price
 from app.services.channel_parse import (
     apply_levels,
     is_close_message,
+    is_loss_message,
     merge_parsed,
     parse_signal,
     ref_from_text,
@@ -177,6 +178,53 @@ def _recipient_ids(settings: Settings, db_ids: list[int]) -> list[int]:
     return ids
 
 
+DUP_WINDOW_MIN = 30     # shu daqiqa ichida bir xil setup = takroriy signal
+DUP_TOL_PCT = 0.001     # narxning 0.1% (oltinda ~4$)
+DUP_TOL_R = 0.6         # yoki 1R masofasining 60%
+
+
+async def _recent_twin(session, *, symbol: str, direction: str,
+                       entry: float, sl: float) -> Signal | None:
+    """v65: yaqin vaqt ichida deyarli bir xil signal bo'lsa — o'shani qaytaradi.
+
+    Kanal bir setupni bir necha marta tashlasa (yoki tahrirlab qayta yuborsa)
+    yangi karta YUBORILMAYDI: bir xil juftlik + yo'nalish + narx zonasi = bitta signal.
+    """
+    try:
+        since = datetime.now(timezone.utc) - timedelta(minutes=DUP_WINDOW_MIN)
+        rows = list((await session.execute(
+            select(Signal)
+            .where(
+                Signal.symbol == symbol,
+                Signal.direction == direction,
+                Signal.created_at >= since,
+            )
+            .order_by(Signal.id.desc())
+            .limit(8)
+        )).scalars().all())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] takroriy so'rovi: %s", exc)
+        return None
+    for old in rows:
+        try:
+            e0 = float(old.entry or 0.0)
+        except Exception:  # noqa: BLE001
+            continue
+        if e0 <= 0:
+            continue
+        try:
+            s0 = float(old.sl or 0.0)
+        except Exception:  # noqa: BLE001
+            s0 = 0.0
+        tol = max(abs(e0) * DUP_TOL_PCT, (abs(e0 - s0) * DUP_TOL_R) if s0 else 0.0)
+        if abs(float(entry) - e0) > tol:
+            continue
+        if s0 and abs(float(sl) - s0) > tol:
+            continue
+        return old
+    return None
+
+
 async def _park_unique(session, *, symbol: str, timeframe: str, direction: str) -> None:
     """Unique index: eski qator is_active=False. Lot/paper TEGILMAYDI."""
     try:
@@ -199,8 +247,14 @@ async def _park_unique(session, *, symbol: str, timeframe: str, direction: str) 
             pass
 
 
-async def flatten(session, *, symbol: str | None, price: float) -> int:
-    """Faqat admin 'tugatdik' — paper yopiladi. Yangi SIGNAL buni chaqirmaydi."""
+async def flatten(session, *, symbol: str | None, price: float,
+                  loss: bool = False) -> int:
+    """Faqat admin 'tugatdik' — paper yopiladi. Yangi SIGNAL buni chaqirmaydi.
+
+    v65: `loss=True` (kanal 'SL/zarar' deb yozgan natija posti) — bitim MAHALLIY
+    narxda emas, o'z STOP narxida yopiladi: minus stop lossgacha qancha bo'lsa,
+    o'shancha hisoblanadi (foydalanuvchi talabi).
+    """
     n = 0
     px = float(price or 0) or 0.0
     sm = symbol or "XAUUSDT"
@@ -211,22 +265,40 @@ async def flatten(session, *, symbol: str | None, price: float) -> int:
         opens = []
     for old in opens:
         fill = px if px > 0 else float(old.entry or 0)
+        r_pct = 0.0
+        try:
+            ent = float(old.entry or 0)
+            r_pct = abs(float(old.sl or ent) - ent) / ent * 100.0 if ent else 0.0
+        except Exception:  # noqa: BLE001
+            r_pct = 0.0
         try:
             if _paper is not None:
                 for i, pos in enumerate(await _paper.open_positions(session, signal_id=old.id)):
+                    use = fill
+                    if loss:
+                        stop = float(getattr(pos, "sl", 0) or old.sl or 0) or 0.0
+                        if stop > 0:
+                            use = stop  # v65: minus STOP narxigacha hisoblanadi
                     try:
                         await _paper.apply_fill(
-                            session, pos, fill, portion=0.0, is_final=True,
-                            exit_price_for_remaining=fill, count_trade=(i == 0),
-                            reason="BEKOR (kanal)",
+                            session, pos, use, portion=0.0, is_final=True,
+                            exit_price_for_remaining=use, count_trade=(i == 0),
+                            reason=("SL (kanal)" if loss else "BEKOR (kanal)"),
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("[CH] paper yopish: %s", exc)
-            await crud.close_signal(
-                session, old, status=SignalStatus.CANCELLED,
-                result="CANCELLED", r_multiple=0.0, pnl_percent=0.0,
-                close_price=fill, reason="BEKOR (kanal)",
-            )
+            if loss:
+                await crud.close_signal(
+                    session, old, status=SignalStatus.SL_HIT,
+                    result="LOSS", r_multiple=-1.0, pnl_percent=-abs(r_pct),
+                    close_price=fill, reason="SL (kanal)",
+                )
+            else:
+                await crud.close_signal(
+                    session, old, status=SignalStatus.CANCELLED,
+                    result="CANCELLED", r_multiple=0.0, pnl_percent=0.0,
+                    close_price=fill, reason="BEKOR (kanal)",
+                )
             n += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CH] flatten #%s: %s", old.id, exc)
@@ -244,8 +316,9 @@ async def flatten(session, *, symbol: str | None, price: float) -> int:
             .where(Signal.symbol == sm, Signal.is_active.is_(True))
             .values(
                 is_active=False,
-                status=SignalStatus.CANCELLED.value,
-                result="CANCELLED",
+                status=(SignalStatus.SL_HIT.value if loss
+                        else SignalStatus.CANCELLED.value),
+                result=("LOSS" if loss else "CANCELLED"),
                 closed_at=datetime.now(timezone.utc),
             )
         )
@@ -260,11 +333,13 @@ async def flatten(session, *, symbol: str | None, price: float) -> int:
         try:
             for pos in await _paper.open_positions(session, symbol=sm):
                 fill = px if px > 0 else float(pos.entry or 0)
+                if loss:
+                    fill = float(getattr(pos, "sl", 0) or fill) or fill
                 try:
                     await _paper.apply_fill(
                         session, pos, fill, portion=0.0, is_final=True,
                         exit_price_for_remaining=fill, count_trade=False,
-                        reason="BEKOR (kanal)",
+                        reason=("SL (kanal)" if loss else "BEKOR (kanal)"),
                     )
                     n += 1
                 except Exception as exc:  # noqa: BLE001
@@ -409,10 +484,20 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
             except Exception:  # noqa: BLE001
                 pass
             sm = (cur.symbol if cur else None) or "XAUUSDT"
-            n = await flatten(session, symbol=sm, price=_last_px(sm))
-            logger.info("[CH] yopish %s n=%d", src, n)
-            await _diag(skey, src, "closed", "yopish xabari", text or "")
-            if n and _notifier is not None:
+            loss_post = is_loss_message(text) or is_loss_message(raw)
+            n = await flatten(session, symbol=sm, price=_last_px(sm), loss=loss_post)
+            logger.info("[CH] yopish %s n=%d loss=%s", src, n, loss_post)
+            await _diag(skey, src, "closed",
+                        "stop loss natijasi" if loss_post else "yopish xabari", text or "")
+            if n and _notifier is not None and loss_post:
+                try:
+                    await _notifier.send_event(
+                        f"\U0001F6D1 <b>{sm}</b> — kanal STOP deb yozdi: bitim "
+                        "<b>stop narxida</b> yopildi (minus stop lossgacha hisoblandi)."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            elif n and _notifier is not None:
                 try:
                     await _notifier.send_event(
                         f"📂 <b>{sm}</b> — paper yopildi (kanal / admin)."
@@ -773,6 +858,23 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
             tp3 = r_price(direction, float(levels_entry), float(levels_sl), 3)
         else:
             logger.info("[CH] TP kanal postidan: %s / %s / %s", tp1, tp2, tp3)
+
+    # ---- v65: TAKRORIY signal himoyasi (kanal bir setupni bir necha marta tashlaydi) ----
+    try:
+        twin = await _recent_twin(
+            session, symbol=symbol, direction=direction.value,
+            entry=float(levels_entry), sl=float(levels_sl),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] takroriy tekshiruvi: %s", exc)
+        twin = None
+    if twin is not None:
+        logger.warning(
+            "[CH] TAKRORIY signal tashlandi: %s %s entry=%s ~ #%s entry=%s (%s)",
+            symbol, direction.value, levels_entry, getattr(twin, "id", "?"),
+            getattr(twin, "entry", "?"), src,
+        )
+        return "dup"
 
     await _park_unique(
         session, symbol=symbol, timeframe=timeframe, direction=direction.value,

@@ -616,7 +616,7 @@ async def do_remove(message: Message, state) -> None:
 @router.message(Command("tozalash"))
 @router.message(Command("forget"))
 async def cmd_wipe(message: Message) -> None:
-    """\U0001F9F9 Bot hamma signalni, statistikani va kanal ro'yxatini unutadi."""
+    """\U0001F9F9 Signallar/statistika tozalanadi. ULANGAN KANALLAR SAQLANADI (v65)."""
     if not _is_admin(message.from_user.id if message.from_user else None):
         await message.answer("\U0001F9F9 Tozalash — faqat admin.")
         return
@@ -626,9 +626,9 @@ async def cmd_wipe(message: Message) -> None:
         "\u2022 barcha signallar (raqamlash \u21161 dan boshlanadi)\n"
         "\u2022 paper (virtual) hisob va pozitsiyalar\n"
         "\u2022 strategiya + kanal statistikasi\n"
-        "\u2022 kanallar ro'yxati (keyin o'zingiz qayta qo'shasiz)\n"
         "\n"
         "\u2705 Akkaunt ulanishi SAQLANADI — QR/kod kerak emas.\n"
+        "\U0001F4E1 <b>Ulangan kanallar SAQLANADI</b> — kanallar o'chib ketmaydi.\n"
         "\u2139\uFE0F Kanal qo'shilganda eski xabarlar O'QILMAYDI — faqat YANGI postlar.\n"
         "\n"
         "Davom etamizmi?",
@@ -664,7 +664,7 @@ async def wipe_confirm(cb: CallbackQuery) -> None:
         return
     from app.services.wipe import report_text, wipe_all
     try:
-        res = await wipe_all(drop_channels=True)
+        res = await wipe_all(drop_channels=False)  # v65: kanallar SAQLANADI
     except Exception as exc:  # noqa: BLE001
         logger.exception("[TOZALASH] %s", exc)
         await cb.message.answer(f"\u274C Tozalashda xato: {exc}")

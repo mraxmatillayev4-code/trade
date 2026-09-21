@@ -27,6 +27,7 @@ _SKIP_LOGIN = {
     "🤖 Avto-trade: yoqish/o'chirish",
     "⚙️ Sozlamalar",
     "ℹ️ Ma'lumot",
+    "☰ Menyu",
 }
 
 
@@ -103,10 +104,18 @@ async def cmd_start(message: Message, state) -> None:
         )
     await message.answer(
         MENU_READY + extra +
-        "\n🤖 Avto-trade <b>yoqilgan</b> — yangi signallar virtual hisobda ochiladi.",
+        "\n🤖 Avto-trade <b>yoqilgan</b> — yangi signallar virtual hisobda ochiladi.\n"
+        "\n☰ <b>Menyu</b> tugmasi pastda doim turadi; uni bosib bo'limlarga qaytasiz.\n"
+        "<i>Barcha commandlar ro'yxati: pastdagi ☰ (yoki klaviaturada «/» belgisi).</i>",
         parse_mode="HTML",
         reply_markup=kb.main_menu_reply(uid),
     )
+
+
+@router.message(F.text == "☰ Menyu")
+async def menu_button(message: Message, state) -> None:
+    """«☰ Menyu» tugmasi — xuddi /menu kabi ishlaydi (istalgan holatda)."""
+    await cmd_menu(message, state)
 
 
 @router.message(Command("menu"))

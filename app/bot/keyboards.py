@@ -39,11 +39,15 @@ def main_menu_reply(user_id: int | None = None) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📡 Kanallar"),
             KeyboardButton(text="📚 Strategiyalar"),
         )
-    kb.row(KeyboardButton(text="ℹ️ Ma'lumot"))
+    # v64: «☰ Menyu» doim ko'rinib turadi (klaviatura yig'ilib qolsa ham qaytarib oladi)
+    kb.row(
+        KeyboardButton(text="☰ Menyu"),
+        KeyboardButton(text="ℹ️ Ma'lumot"),
+    )
     return kb.as_markup(
         resize_keyboard=True,
         one_time_keyboard=False,
-        is_persistent=False,
+        is_persistent=True,
         input_field_placeholder="Kerakli bo'limni tanlang 👇",
     )
 

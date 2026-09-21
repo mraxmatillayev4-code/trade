@@ -299,6 +299,32 @@ def is_close_message(text: str | None) -> bool:
     return False
 
 
+_LOSS_NOW = re.compile(
+    r"(\bsl\s*(?:hit|ur(?:di|ildi|dimi)?|bo'?ldi|da\s*yop|ni\s*ur)|"
+    r"\bstop\s*loss\b|\bstoploss\b|"
+    r"-\s*\d{1,4}\s*(?:pip|pips|punkt|point)|\bzarar\b|\bloss\b)",
+    re.I,
+)
+_LOSS_PLAN = re.compile(
+    r"\b(?:sl|stop\s*loss|stoploss)\b\s*[:=]?\s*\d{3,5}(?:[.,]\d{1,3})?", re.I
+)
+
+
+def is_loss_message(text: str | None) -> bool:
+    """Kanal 'stop loss / zarar' deb yozgan natija posti (v65).
+
+    Bunday postda paper bitim MAHALLIY narxda emas, o'z STOP narxida yopiladi —
+    minus stop lossgacha qancha bo'lsa, o'shancha hisoblanadi.
+    Yangi signal rejasi («SL: 4367.44») bunga KIRMAYDI.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if _LOSS_PLAN.search(raw):
+        return False
+    return bool(_LOSS_NOW.search(raw))
+
+
 def _zone_entry(raw: str) -> float | None:
     _lo, _hi, mid = _zone_bounds(raw)
     return mid
