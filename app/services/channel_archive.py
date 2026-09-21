@@ -313,75 +313,153 @@ def last_dump() -> dict:
 #  OCR pass (rasm xabarlaridagi yozuvni o'qish)
 # --------------------------------------------------------------------------- #
 
-async def ocr_pass(per_channel: int = 30, client=None) -> dict:
-    """Rasm xabarlarini tesseract bilan o'qib, `ocr` ustuniga yozadi."""
+async def ocr_pass(per_channel: int = 20, client=None, progress=None) -> dict:
+    """Rasm xabarlarini tesseract bilan o'qib, `ocr` ustuniga yozadi.
+
+    v48: har kanal uchun bitta API chaqiruvida xabarlar olinadi (get_messages ids=[...]),
+    jarayon `progress(done, total, text)` orqali bildiriladi, xatolar namuna bilan qaytadi.
+    """
     from app.services.channel_ocr import ocr_image
 
-    out = {"done": 0, "empty": 0, "fail": 0, "secs": 0.0}
+    out = {"done": 0, "empty": 0, "fail": 0, "skip": 0, "secs": 0.0,
+           "errors": [], "per": [], "total": 0}
     t0 = time.time()
+    per_channel = max(1, min(int(per_channel or 20), 100))
+
+    def _err(msg: str) -> None:
+        if len(out["errors"]) < 5:
+            out["errors"].append(str(msg)[:200])
+
     async with _lock:
+        # 1) OCR kerak bo'lgan qatorlar (rasm, hali o'qilmagan)
         try:
             async with async_session_factory() as session:
                 await ensure_table(session)
                 rows = (await session.execute(text(
                     f"SELECT ch_key, msg_id FROM {TABLE} "
-                    f"WHERE has_photo = TRUE AND (ocr IS NULL OR ocr = '') "
+                    f"WHERE has_photo IS TRUE AND (ocr IS NULL OR ocr = '') "
                     f"ORDER BY ch_key, msg_id DESC"))).fetchall()
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"{type(exc).__name__}: {exc}"
             return out
+
         picked: dict = {}
         for ch_key, mid in rows:
-            lst = picked.setdefault(ch_key, [])
+            lst = picked.setdefault(str(ch_key), [])
             if len(lst) < per_channel:
-                lst.append(mid)
+                lst.append(int(mid))
+        out["total"] = sum(len(v) for v in picked.values())
+        if not out["total"]:
+            out["secs"] = round(time.time() - t0, 1)
+            return out
+
+        # 2) klient
         own = False
         try:
             if client is None:
                 client, own = await _get_client()
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            return out
+
+        try:
             async with async_session_factory() as session:
                 chans = await list_channels(session)
-            ent = {}
-            for ch in chans:
-                ent[stat_key(ch.get("username"), ch.get("chat_id"))] = ch
+            ent = {stat_key(c.get("username"), c.get("chat_id")): c for c in chans}
+
+            done_all = 0
             for ch_key, ids in picked.items():
                 ch = ent.get(ch_key)
+                name = display_name(ch) if ch else ch_key
+                stat = {"name": name, "n": 0, "done": 0, "empty": 0, "fail": 0}
                 if not ch:
+                    out["skip"] += len(ids)
+                    stat["fail"] = len(ids)
+                    out["per"].append(stat)
                     continue
                 entity = await _resolve(client, ch)
                 if entity is None:
+                    out["fail"] += len(ids)
+                    stat["fail"] = len(ids)
+                    out["per"].append(stat)
+                    _err(f"{name}: kanal entity topilmadi (@{ch.get('username')})")
                     continue
-                for mid in ids:
+
+                # bitta chaqiruvda barcha kerakli xabarlar
+                msgs: dict = {}
+                try:
+                    got = await client.get_messages(entity, ids=ids)
+                    if isinstance(got, (list, tuple)):
+                        for m in got:
+                            if m is not None:
+                                msgs[int(getattr(m, "id", 0) or 0)] = m
+                    elif got is not None:
+                        msgs[int(getattr(got, "id", 0) or 0)] = got
+                except Exception as exc:  # noqa: BLE001
+                    _err(f"{name}: get_messages {type(exc).__name__}: {exc}")
+
+                missing = [i for i in ids if i not in msgs]
+                if missing:
                     try:
-                        msg = await client.get_messages(entity, ids=mid)
-                        if msg is None or not _is_photo(msg):
-                            out["fail"] += 1
-                            continue
+                        low = min(missing)
+                        async for m in client.iter_messages(entity, limit=len(missing) + 60):
+                            mid = int(getattr(m, "id", 0) or 0)
+                            if mid and mid not in msgs and mid >= low:
+                                msgs[mid] = m
+                    except Exception as exc:  # noqa: BLE001
+                        _err(f"{name}: iter_messages {type(exc).__name__}: {exc}")
+
+                for mid in ids:
+                    stat["n"] += 1
+                    done_all += 1
+                    msg = msgs.get(mid)
+                    if msg is None:
+                        out["fail"] += 1
+                        stat["fail"] += 1
+                        await _mark_ocr(ch_key, mid, "")
+                        continue
+                    if not (_is_photo(msg) or _is_video(msg)):
+                        out["skip"] += 1
+                        stat["fail"] += 1
+                        await _mark_ocr(ch_key, mid, "")   # media yo'q — qayta urinmaymiz
+                        continue
+                    try:
                         buf = io.BytesIO()
-                        got = await msg.download_media(file=buf)
-                        data = got if isinstance(got, (bytes, bytearray)) else buf.getvalue()
+                        got_b = await msg.download_media(file=buf)
+                        data = got_b if isinstance(got_b, (bytes, bytearray)) else buf.getvalue()
                         if not data:
-                            out["fail"] += 1
-                            continue
-                        txt = ""
+                            raise RuntimeError("rasm yuklanmadi (bo'sh)")
                         try:
                             txt = (ocr_image(bytes(data)) or "").strip()
                         except Exception as exc:  # noqa: BLE001
-                            logger.info("[CH-DUMP] ocr %s#%s: %s", ch_key, mid, exc)
-                        async with async_session_factory() as session:
-                            await session.execute(
-                                text(f"UPDATE {TABLE} SET ocr = :o WHERE ch_key = :k AND msg_id = :m"),
-                                {"o": txt[:4000], "k": ch_key, "m": int(mid)},
-                            )
-                            await session.commit()
+                            txt = ""
+                            _err(f"OCR {name}#{mid}: {type(exc).__name__}: {exc}")
                         if txt:
                             out["done"] += 1
+                            stat["done"] += 1
                         else:
                             out["empty"] += 1
+                            stat["empty"] += 1
+                        await _mark_ocr(ch_key, mid, txt)
                     except Exception as exc:  # noqa: BLE001
                         out["fail"] += 1
-                        logger.info("[CH-DUMP] ocr xato %s#%s: %s", ch_key, mid, exc)
-                    await asyncio.sleep(0.05)
+                        stat["fail"] += 1
+                        _err(f"{name}#{mid}: {type(exc).__name__}: {exc}")
+                        await _mark_ocr(ch_key, mid, "")
+                    await asyncio.sleep(0.02)
+                    if progress is not None and done_all % 5 == 0:
+                        try:
+                            progress(done_all, out["total"], name)
+                        except Exception:  # noqa: BLE001
+                            pass
+                out["per"].append(stat)
+                logger.warning("[CH-OCR] %s: o'qildi %d | bo'sh %d | xato %d",
+                               name, stat["done"], stat["empty"], stat["fail"])
+                if progress is not None:
+                    try:
+                        progress(done_all, out["total"], name)
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -392,6 +470,100 @@ async def ocr_pass(per_channel: int = 30, client=None) -> dict:
                     pass
     out["secs"] = round(time.time() - t0, 1)
     return out
+
+
+async def _mark_ocr(ch_key: str, msg_id: int, ocr: str) -> None:
+    """OCR natijasini yozadi (bo'sh bo'lsa '—' — qayta urinmaslik uchun)."""
+    try:
+        async with async_session_factory() as session:
+            await session.execute(
+                text(f"UPDATE {TABLE} SET ocr = :o WHERE ch_key = :k AND msg_id = :m"),
+                {"o": (ocr or "\u2014")[:4000], "k": ch_key, "m": int(msg_id)},
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[CH-OCR] yozish %s#%s: %s", ch_key, msg_id, exc)
+
+
+async def test_one(limit_channel: int = 0, client=None) -> dict:
+    """Diagnostika: tesseract + baza + klient + 1 rasmni sinab ko'rish."""
+    import shutil as _sh
+
+    rep: dict = {"steps": []}
+
+    def add(ok: bool, text: str) -> None:
+        rep["steps"].append(("ok" if ok else "xato") + ": " + text)
+
+    tp = ""
+    try:
+        from app.services import channel_ocr as _oc
+        tp = getattr(_oc, "_TESS_EXE", "") or (_sh.which("tesseract") or "")
+    except Exception as exc:  # noqa: BLE001
+        add(False, f"OCR moduli: {type(exc).__name__}: {exc}")
+    rep["tesseract"] = tp
+    add(bool(tp), f"tesseract: {tp or 'TOPILMADI'}")
+
+    need = 0
+    try:
+        async with async_session_factory() as session:
+            await ensure_table(session)
+            r = await session.execute(text(
+                f"SELECT COUNT(*) FROM {TABLE} WHERE has_photo IS TRUE AND (ocr IS NULL OR ocr = '')"))
+            need = int(r.scalar() or 0)
+            r2 = await session.execute(text(f"SELECT COUNT(*) FROM {TABLE}"))
+            rep["rows"] = int(r2.scalar() or 0)
+        add(True, f"bazada: {rep['rows']} xabar | OCR kutayotgan rasm: {need}")
+    except Exception as exc:  # noqa: BLE001
+        add(False, f"baza: {type(exc).__name__}: {exc}")
+
+    try:
+        cl, own = (client, False) if client is not None else await _get_client()
+        add(True, "Telegram klient: " + ("watcher klienti" if not own else "vaqtincha yangi klient"))
+        async with async_session_factory() as session:
+            chans = await list_channels(session)
+        add(bool(chans), f"kanallar: {len(chans)}")
+        picked = None
+        async with async_session_factory() as session:
+            for c in chans:
+                k = stat_key(c.get("username"), c.get("chat_id"))
+                r = (await session.execute(text(
+                    f"SELECT msg_id FROM {TABLE} WHERE ch_key = :k AND has_photo IS TRUE "
+                    f"AND (ocr IS NULL OR ocr = '') ORDER BY msg_id DESC LIMIT 1"), {"k": k})).fetchone()
+                if r:
+                    picked = (c, int(r[0]))
+                    break
+        if not picked:
+            add(False, "sinov uchun rasm topilmadi (OCR allaqachon bajarilgan bo'lishi mumkin)")
+            return rep
+        c, mid = picked
+        entity = await _resolve(cl, c)
+        add(entity is not None, f"sinov kanali: {display_name(c)} | xabar #{mid}")
+        if entity is None:
+            return rep
+        m = await cl.get_messages(entity, ids=mid)
+        if isinstance(m, (list, tuple)):
+            m = m[0] if m else None
+        if m is None:
+            add(False, "xabar topilmadi (o'chirilgan?)")
+            return rep
+        buf = io.BytesIO()
+        got = await m.download_media(file=buf)
+        data = got if isinstance(got, (bytes, bytearray)) else buf.getvalue()
+        add(bool(data), f"rasm yuklandi: {len(data or b'')} bayt")
+        if data:
+            t0 = time.time()
+            from app.services.channel_ocr import ocr_image
+            txt = (ocr_image(bytes(data)) or "").strip()
+            add(bool(txt), f"OCR {time.time() - t0:.1f}s → {len(txt)} belgi. "
+                           f"Boshi: {(txt[:100] or '(bo\'sh)')}")
+        if own:
+            try:
+                await cl.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:  # noqa: BLE001
+        add(False, f"klient/sinov: {type(exc).__name__}: {exc}")
+    return rep
 
 
 # --------------------------------------------------------------------------- #
@@ -445,8 +617,9 @@ async def export_txt() -> tuple[str, bytes]:
                     lines.append(f"[{mid}] {_fmt_date(dt)} | " + " | ".join(flags))
                     body = (body or "").strip()
                     lines.append(body if body else "(matn yo'q)")
-                    if ocr:
-                        lines.append(f"OCR: {str(ocr).strip()}")
+                    ocr_s = str(ocr or "").strip()
+                    if ocr_s and ocr_s not in ("\u2014", "-"):
+                        lines.append(f"OCR: {ocr_s}")
                     lines.append("-" * 60)
     except Exception as exc:  # noqa: BLE001
         lines.append(f"XATO: {type(exc).__name__}: {exc}")

@@ -254,21 +254,52 @@ async def _dump_job(message: Message, limit: int) -> None:
 
 
 async def _ocr_job(message: Message, per: int) -> None:
-    try:
-        from app.services import channel_archive as arc
+    """v48: jarayon ko'rsatkichi bilan OCR."""
+    from app.services import channel_archive as arc
 
-        res = await arc.ocr_pass(per_channel=per)
-        await message.answer(
-            "\U0001F524 <b>Rasmlardagi yozuv o'qildi</b>\n"
+    state = {"t": 0.0, "txt": ""}
+
+    async def _edit(text: str) -> None:
+        try:
+            await message.edit_text(text, parse_mode="HTML")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _prog(done: int, total: int, name: str) -> None:
+        import time as _t
+        now = _t.time()
+        if now - float(state["t"]) < 6:
+            return
+        state["t"] = now
+        txt = (f"\U0001F524 <b>OCR: {done}/{total}</b>\n"
+               f"hozir: {name}\n<i>(tesseract ~3s/rasm — kuting)</i>")
+        try:
+            asyncio.get_running_loop().create_task(_edit(txt))
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        res = await arc.ocr_pass(per_channel=per, progress=_prog)
+        lines = ["\U0001F524 <b>OCR tugadi</b>", ""]
+        lines.append(
             f"o'qildi: <b>{res.get('done')}</b> | bo'sh: {res.get('empty')} | "
-            f"xato: {res.get('fail')} | {res.get('secs')}s"
-            + (f"\n\u274C {res['error']}" if res.get("error") else ""),
-            parse_mode="HTML",
+            f"o'tkazildi: {res.get('skip')} | xato: {res.get('fail')} | {res.get('secs')}s"
         )
+        for st in (res.get("per") or [])[:15]:
+            lines.append(f"\u2022 {st['name']}: \u2705 {st['done']} \u2796 {st['empty']} \u274C {st['fail']}")
+        if res.get("errors"):
+            lines.append("")
+            lines.append("<b>Xatolar (namuna):</b>")
+            for e in res["errors"][:3]:
+                lines.append(f"\u2022 <code>{e[:160]}</code>")
+        if res.get("error"):
+            lines.append(f"\u274C {res['error']}")
+        await message.answer("\n".join(lines), parse_mode="HTML")
         name, data = await arc.export_txt()
         await message.answer_document(BufferedInputFile(data, filename=name),
                                       caption="\U0001F4C4 OCR qo'shilgan fayl.")
     except Exception as exc:  # noqa: BLE001
+        logger.exception("[CH-DUMP] ocr: %s", exc)
         await message.answer(f"\u274C Xato: {type(exc).__name__}: {exc}")
 
 
@@ -302,12 +333,44 @@ async def cmd_dump100ocr(message: Message) -> None:
     if _DUMP_TASK and not _DUMP_TASK.done():
         await message.reply("\u23F3 Avvalgi vazifa tugamadi. Kuting...")
         return
-    per = 30
+    per = 20
     for part in (message.text or "").split()[1:]:
         if part.isdigit():
-            per = max(5, min(int(part), 100))
-    await message.reply(f"\U0001F524 Har kanaldan {per} ta rasm o'qilmoqda...", parse_mode="HTML")
+            per = max(3, min(int(part), 100))
+    await message.reply(
+        f"\U0001F524 Har kanaldan <b>{per}</b> ta rasm o'qilmoqda (tesseract ~3s/rasm).\n"
+        "Jarayonni shu xabarda ko'rsatib turaman.",
+        parse_mode="HTML",
+    )
     _DUMP_TASK = asyncio.create_task(_ocr_job(message, per))
+
+
+@router.message(Command("100test"))
+async def cmd_dump100test(message: Message) -> None:
+    """Diagnostika: OCR zanjirini qadam-baqadam tekshiradi."""
+    global _DUMP_TASK
+    if not _is_admin(getattr(message.from_user, "id", None)):
+        return
+    if _DUMP_TASK and not _DUMP_TASK.done():
+        await message.reply("\u23F3 Avvalgi vazifa tugamadi. Kuting...")
+        return
+    await message.reply("\U0001F9EA Tekshirilmoqda (10-20 soniya)...")
+
+    async def _job() -> None:
+        from app.services import channel_archive as arc
+
+        try:
+            rep = await arc.test_one()
+        except Exception as exc:  # noqa: BLE001
+            await message.answer(f"\u274C Xato: {type(exc).__name__}: {exc}")
+            return
+        lines = ["\U0001F9EA <b>Diagnostika natijasi</b>", ""]
+        for st in rep.get("steps", []):
+            mark = "\u2705" if st.startswith("ok") else "\u26A0\uFE0F"
+            lines.append(f"{mark} {st.split(':', 1)[-1].strip()}")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    _DUMP_TASK = asyncio.create_task(_job())
 
 
 @router.message(Command("100stat"))

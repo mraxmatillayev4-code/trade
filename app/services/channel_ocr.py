@@ -1,4 +1,7 @@
-"""Rasm/skrinshotdagi yozuvni o'qish (Tesseract). Yo'q bo'lsa — bo'sh qator."""
+"""Rasm/skrinshotdagi yozuvni o'qish (Tesseract). Yo'q bo'lsa — bo'sh qator.
+
+v48: tezlashtirildi — katta rasm 1600px ga kichraytiriladi, keraksiz OCR urinishlar o'tkaziladi.
+"""
 from __future__ import annotations
 
 import io
@@ -66,6 +69,8 @@ def ocr_image(data: bytes | None) -> str:
         if w < 1000:
             scale = max(2, int(1100 / max(w, 1)))
             img = img.resize((w * scale, h * scale))
+        elif w > 1600:
+            img = img.resize((1600, max(1, int(h * 1600 / w))))
         gray = ImageOps.grayscale(img)
         gray = ImageEnhance.Contrast(gray).enhance(2.0)
         gray = gray.filter(ImageFilter.SHARPEN)
@@ -73,14 +78,20 @@ def ocr_image(data: bytes | None) -> str:
         try:
             import pytesseract
             _setup_cmd(pytesseract)
-            for cfg in ("--psm 6", "--psm 11", "--psm 4"):
+            # v48: tez rejim — birinchi urinish yetarli bo'lsa qolganini o'tkazamiz
+            for idx, cfg in enumerate(("--psm 6", "--psm 11", "--psm 4")):
                 try:
                     t = pytesseract.image_to_string(gray, lang="eng", config=cfg) or ""
                 except Exception:  # noqa: BLE001
-                    t = pytesseract.image_to_string(gray, config=cfg) or ""
+                    try:
+                        t = pytesseract.image_to_string(gray, config=cfg) or ""
+                    except Exception:  # noqa: BLE001
+                        t = ""
                 t = " ".join(t.split())
                 if t and t not in texts:
                     texts.append(t)
+                if idx == 0 and len(t) >= 60:
+                    break
         except Exception as exc:  # noqa: BLE001
             logger.info("[CH-OCR] tesseract yo'q/xato: %s", exc)
             return ""
