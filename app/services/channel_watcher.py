@@ -331,6 +331,14 @@ async def _run() -> None:
             if not await client.is_user_authorized():
                 _status["authorized"] = False
                 _note("sessiya yaroqsiz — /akkaunt")
+                if not _alerted:
+                    _alerted = True
+                    await ping_admin(
+                        "\u26A0\uFE0F <b>Telegram akkaunt sessiyasi o'chgan.</b>\n"
+                        "Telegram uni bekor qilgan (chiqib ketgan) — kanallar o'qilmayapti.\n"
+                        "Tuzatish: <b>/akkaunt</b> → api_id → api_hash → telefon → kod."
+                    )
+                    logger.warning("[CH-WATCH] sessiya o'chgan — adminga xabar berildi")
                 await client.disconnect()
                 await asyncio.sleep(90)
                 continue

@@ -550,17 +550,24 @@ def _only_digits(text: str | None) -> str:
     return "".join(c for c in (text or "") if c.isdigit())
 
 
-_CODE_HINT = (
-    "📲 Telegram kod yubordi (ilova yoki SMS).\n\n"
-    "⚠️ <b>Kodni yolg'iz raqam qilib yozmang.</b>\n"
-    "Telegram uni o'chirib tashlaydi — shu sabab oldin kira olmadingiz.\n\n"
-    "Kod 12345 bo'lsa, shunday yuboring:\n"
-    "<code>A12345</code>\n"
-    "yoki\n"
-    "<code>12 345</code>\n\n"
-    "Harf/bo'shliqni bot o'zi olib tashlaydi.\n"
-    "Yangi kod: <b>qayta</b>"
-)
+def _code_hint(delivery: str = "") -> str:
+    from app.services.channel_user import delivery_text
+    return (
+        delivery_text(delivery) + "\n\n"
+        "Kodni <b>shundayligicha</b> yuboring — faqat raqamlar ham bo'ladi:\n"
+        "<code>12345</code>  yoki  <code>A12345</code>  yoki  <code>12 345</code>\n"
+        "Harf va bo'shliqni bot o'zi olib tashlaydi.\n\n"
+        "SMS kelmagan bo'lsa: <b>sms</b> deb yozing (majburiy SMS).\n"
+        "Yangi kod kerak bo'lsa: <b>qayta</b>\n"
+        "Bekor qilish: <b>bekor</b>\n\n"
+        "⚠️ Kod so'rashni tez-tez takrorlamang — Telegram kutish (flood) qo'yadi."
+    )
+
+
+def _digit_code(text: str | None) -> str:
+    """Foydalanuvchi yozgan koddan raqamlarni ajratadi (3-8 xona)."""
+    d = "".join(c for c in (text or "") if c.isdigit())
+    return d if 3 <= len(d) <= 8 else ""
 
 
 class LoginInProgress(Filter):
@@ -589,10 +596,19 @@ async def account_start(message: Message, state) -> None:
     uid = message.from_user.id
     _login_tmp[uid] = {"step": "api_id"}
     await state.clear()
-    from app.services.channel_user import is_linked
+    from app.services.channel_user import session_status
     extra = ""
-    if await is_linked():
-        extra = "Akkaunt allaqachon ulangan. Qayta ulash:\n\n"
+    st = await session_status()
+    if st.get("alive"):
+        extra = (f"Akkaunt ulangan va <b>tirik</b>: {st.get('account') or '—'}"
+                 f" · kanallar: {st.get('channels', 0)}\n"
+                 f"Qayta ulash (sessiya yangilanadi):\n\n")
+    elif st.get("has_session"):
+        extra = ("⚠️ Saqlangan sessiya <b>o'chgan</b> "
+                 f"({st.get('error') or 'Telegram bekor qilgan'}).\n"
+                 "Kanallar o'qilmayapti — qayta ulanamiz:\n\n")
+    elif st.get("has_api"):
+        extra = "api_id/api_hash bor, lekin akkaunt ulanmagan. Telefon va kod kerak:\n\n"
     await message.answer(
         "👤 <b>Telegram akkaunt ulash</b>\n"
         f"{extra}"
@@ -645,37 +661,48 @@ async def account_wizard(message: Message, state) -> None:
                 await message.answer("Format: +998881234567")
                 return
             from app.services.channel_user import start_login
-            err = await start_login(int(tmp.get("api_id") or 0), str(tmp.get("api_hash") or ""), phone)
+            err, kind = await start_login(
+                int(tmp.get("api_id") or 0), str(tmp.get("api_hash") or ""), phone)
             if err:
-                await message.answer(f"⚠️ {err}")
+                await message.answer(f"⚠️ {err}" + ("" if "kutish" not in err else ""))
                 return
             tmp["phone"] = phone
             tmp["step"] = "code"
-            await message.answer(_CODE_HINT, parse_mode="HTML")
+            tmp["delivery"] = kind
+            await message.answer(_code_hint(kind), parse_mode="HTML")
             return
         if step == "code":
-            from app.services.channel_user import finish_login, resend_code
-            low = t.lower()
-            if low in {"qayta", "kod", "sms", "yangi", "resend"}:
-                err = await resend_code()
-                if err:
-                    await message.answer(f"⚠️ {err}")
-                    return
-                await message.answer("Yangi kod yuborildi.\n\n" + _CODE_HINT, parse_mode="HTML")
+            from app.services.channel_user import finish_login, resend_code, pending_info
+            low = t.lower().strip()
+            if low in {"bekor", "orqaga", "yo'q", "cancel"}:
+                _login_tmp.pop(uid, None)
+                await state.clear()
+                await message.answer("Bekor qilindi. /akkaunt bilan qayta boshlashingiz mumkin.")
                 return
-            digits = _only_digits(t)
-            naked = t.replace(" ", "").replace("-", "").replace(".", "")
-            if naked == digits and 4 <= len(digits) <= 6:
-                await resend_code()
+            if low in {"qayta", "kod", "yangi", "resend", "sms"}:
+                force = low == "sms"
+                err, kind = await resend_code(force_sms=force)
+                if err:
+                    await message.answer(f"⚠️ {err}", parse_mode="HTML")
+                    return
+                tmp["delivery"] = kind
+                head = "📩 Majburiy SMS so'raldi." if force else "🔄 Yangi kod so'raldi."
+                await message.answer(head + "\n\n" + _code_hint(kind), parse_mode="HTML")
+                return
+            code_in = _digit_code(t)
+            if not code_in:
+                info = await pending_info()
+                if not info.get("phone"):
+                    await message.answer("Avval telefon raqamingizni yuboring: /akkaunt")
+                    return
                 await message.answer(
-                    "⛔ Yalang'och kodni Telegram o'zi o'chiradi "
-                    "(oldingi urinish shu sabab yiqildi).\n\n"
-                    "Yangi kod keladi. Uni <b>harf bilan</b> yuboring, "
-                    "masalan: <code>A12345</code> yoki <code>12 345</code>.",
+                    "⚠️ Kodni raqam bilan yuboring (3-8 xona).\n"
+                    "Masalan: <code>12345</code> yoki <code>A12345</code>\n"
+                    "SMS kerak: <b>sms</b> · Yangi kod: <b>qayta</b>",
                     parse_mode="HTML",
                 )
                 return
-            err = await finish_login(t)
+            err = await finish_login(code_in)
             if err == "2FA_NEEDED":
                 tmp["step"] = "2fa"
                 from app.services.channel_user import twofa_hint
@@ -690,16 +717,19 @@ async def account_wizard(message: Message, state) -> None:
                     parse_mode="HTML",
                 )
                 return
-            if err == "EXPIRED_RESENT":
+            if err == "EXPIRED":
                 await message.answer(
-                    "⚠️ Eski kod o'chgan. Yangi kod keldi.\n\n" + _CODE_HINT,
+                    "⚠️ Bu kod eskirgan (yoki almashtirilgan).\n"
+                    "Yangi kod kerak — <b>qayta</b> deb yozing.\n"
+                    "(SMS kerak bo'lsa: <b>sms</b>)",
                     parse_mode="HTML",
                 )
                 return
             if err == "INVALID":
                 await message.answer(
-                    "⚠️ Kod noto'g'ri. Qayta yozing: <code>A12345</code>\n"
-                    "Yangi kod: <b>qayta</b>",
+                    "⚠️ Kod noto'g'ri. Ilojadagi kodni <b>to'liq</b> yozing: "
+                    "<code>12345</code>\n"
+                    "Yangi kod kerak: <b>qayta</b> · SMS kerak: <b>sms</b>",
                     parse_mode="HTML",
                 )
                 return
@@ -713,8 +743,12 @@ async def account_wizard(message: Message, state) -> None:
                 await restart_watcher()
             except Exception:  # noqa: BLE001
                 pass
+            st2 = await session_status()
             await message.answer(
-                "✅ Akkaunt ulandi. Kanallar kuzatiladi.",
+                "✅ <b>Akkaunt ulandi.</b>\n"
+                f"👤 {st2.get('account') or '—'} · 📡 kanallar: {st2.get('channels', 0)}\n"
+                "Kanallar kuzatilmoqda, signallar keladi.",
+                parse_mode="HTML",
                 reply_markup=kb.channels_reply(True),
             )
             return
