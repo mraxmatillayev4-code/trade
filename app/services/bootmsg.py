@@ -41,7 +41,9 @@ def build_text(cmds: list[str] | None = None) -> str:
         "har 48 soatda avto-zaxira (23:00).",
         "\u2022 \U0001F5D1 <b>Kanal o'chirish</b> \u2014 bir bosishda o'chadi "
         "(\u21A9\uFE0F Qaytarish bor).",
-        "\u2022 Terminal skrinshotlari (P/L) signal emas; bir xil xabar takror ishlanmaydi.",
+        "\u2022 Faqat SIGNALLAR o'qiladi: grafik/terminal skrinshotlari signal emas "
+        "\u2014 matnda to'liq reja (yo'nalish + SL/TP) bo'lishi kerak.",
+        "\u2022 Bir xil xabar takror ishlanmaydi (xabar xotirasi).",
     ]
     if cmds:
         lines.append(f"Commandlar ({len(cmds)} ta): " + " ".join("/" + c for c in cmds))

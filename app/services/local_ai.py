@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-77"
+__version__ = "SINO-LAI-78"
 
 import difflib
 import re
@@ -795,6 +795,22 @@ _CHART_TIME_AXIS = re.compile(
     r"[\s\S]{0,160}\b\d{1,2}:\d{2}\b", re.I)
 _DIR_ANY = re.compile(
     r"\b(?:buy|sell|long|short|olim|sotim|kotarilish|pasayish)\b", re.I)
+# v78: grafikdagi KUTILAYOTGAN BUYRUQLAR va natija hisobotlari (rasm signal emas)
+_CHART_ORDER = re.compile(
+    r"\b(?:buy|sell)\s+(?:limit|stop|market|pending)\b"
+    r"|\b(?:buy|sell)\s+\d{1,2}(?:[.,]\d{1,2})?\b", re.I)
+_CHART_RESULT = re.compile(
+    r"\b\d{1,4}\s*pips?\b|\b\d+\s*points\b|\b\d+\s*bars\b", re.I)
+# To'liq savdo rejasi (matndan): SL bor, yoki entry + TP
+_RE_SL = re.compile(r"\b(?:sl|stop|stoploss|stop-?loss)\b[^\d]{0,6}\d{3,5}", re.I)
+_RE_ENTRY = re.compile(r"\b(?:entry|kirish|narx|at)\b[^\d]{0,6}\d{3,5}", re.I)
+_RE_TP = re.compile(r"\b(?:tp\d?|target|maqsad|take)\b[^\d]{0,6}\d{3,5}", re.I)
+
+
+def _full_plan(text: str) -> bool:
+    """v78: matnda TO'LIQ savdo rejasi bormi (SL, yoki entry + TP)."""
+    t = text or ""
+    return bool(_RE_SL.search(t)) or bool(_RE_ENTRY.search(t) and _RE_TP.search(t))
 
 
 def _chart_veto(ocr: str, cap: str = "", has_image: bool = False) -> str:
@@ -815,6 +831,12 @@ def _chart_veto(ocr: str, cap: str = "", has_image: bool = False) -> str:
         return "grafik skrinshoti (narx o'qi: %d daraja)" % len(px)
     if _CHART_TIME_AXIS.search(s):
         return "grafik skrinshoti (vaqt o'qi)"
+    # v78: grafikdagi "BUY 0.1" / "BUY LIMIT 0.1" - kutilayotgan buyruqlar
+    if _CHART_ORDER.search(s):
+        return "grafik skrinshoti (kutilayotgan buyruqlar: BUY/SELL 0.1)"
+    # v78: "45pips" / "4511 points" / "29 bars" - natija hisoboti
+    if _CHART_RESULT.search(s) and (px or _CHART_UI.search(s)):
+        return "natija skrinshoti (pips/points hisoboti)"
     if _CHART_UI.search(s) and len(px) >= 2:
         return "terminal/ilova skrinshoti (menyu tugmalari + narx o'qi)"
     _all = s + "\n" + (cap or "")
@@ -946,8 +968,17 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     # v62: natija/otziv/bekor xabarlari — juftlik va kontekstdan qat'i nazar SIGNAL EMAS
     _early = _result_veto(raw, False) or _result_veto(cap, False)
     if not _early:
-        # v70: OCR — MT5 terminal skrinshoti (ochiq bitim / history / P/L)
-        _early = _chart_veto(ocra, cap, has_image) or _screen_veto(ocra, cap)
+        # v70/v77/v78: rasm — signal MANBASI EMAS. Grafik/terminal skrinshoti bo'lsa:
+        #   * matnda to'liq reja (SL yoki entry+TP) bo'lsa — faqat MATN o'qiladi;
+        #   * aks holda butun post signal emas ("bu bularni ham signal deyapti" shikoyati).
+        _shot = _chart_veto(ocra, cap, has_image)
+        if _shot:
+            if not _full_plan(cap):
+                return None, _shot, True
+            ocra = ""
+            raw = cap
+        else:
+            _early = _screen_veto(ocra, cap)
     if _early:
         return None, _early, True
     body = _pre(raw)
