@@ -251,23 +251,78 @@ async def _menu_text(session, is_admin: bool) -> str:
     ]
     if is_admin:
         lines.append("Admin: ➕ Qo'shish / ➖ O'chirish / 👤 Akkaunt.")
+        lines.append("🗑 Kanalni o'chirish: kanal nomi yozilgan tugmani bosing — BITTA bosishda o'chadi.")
+        lines.append("↩️ Adashsangiz: o'chirilgandan keyin chiqadigan «Qaytarish» tugmasini bosing.")
         lines.append("\U0001F9F9 Hamma signalni unutish (\u21161 dan boshlash): /tozalash")
     return "\n".join(lines)
 
 
+# ======== v66/v71: kanalni BITTA bosishda o'chirish (+ qaytarish) ========
+_DEL_HINT = ("\U0001F5D1 <b>Kanalni o'chirish</b> \u2014 kanal nomini bosing: "
+             "<b>bir bosishda</b> o'chadi (adashsangiz «\u21A9\uFE0F Qaytarish»).")
+
+# Oxirgi o'chirilgan kanal(lar) — adashib bosilsa qaytarish uchun
+_LAST_DEL: dict[int, dict] = {}
+
+
+def _esc_html(t: str) -> str:
+    """HTML uchun xavfsiz matn."""
+    return (str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _channels_inline(channels: list[dict]) -> InlineKeyboardMarkup | None:
+    """Har bir kanal uchun BITTA o'chirish tugmasi + «hammasini» (v71)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for i, ch in enumerate(channels):
+        name = display_name(ch)
+        if len(name) > 32:
+            name = name[:31] + "..."
+        rows.append([InlineKeyboardButton(
+            text="\U0001F5D1 " + name, callback_data="chdel:%d" % i,
+        )])
+    if not rows:
+        return None
+    if len(rows) >= 2:
+        rows.append([InlineKeyboardButton(
+            text="\U0001F5D1 Hammasini o'chirish (%d ta)" % len(rows),
+            callback_data="chdelall",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _del_confirm_kb() -> InlineKeyboardMarkup:
+    """Faqat «hammasini o'chirish» uchun tasdiq (bittasi tasdiqsiz o'chadi)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\u2705 Ha, hammasini", callback_data="chdelyall"),
+        InlineKeyboardButton(text="\u274C Yo'q", callback_data="chdelno"),
+    ]])
+
+
+def _undo_kb(has: bool) -> InlineKeyboardMarkup | None:
+    if not has:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\u21A9\uFE0F Qaytarish", callback_data="chundo"),
+    ]])
+
+
 @router.message(F.text == "📡 Kanallar")
 async def channels_menu(message: Message, state) -> None:
-    if not _is_admin(message.from_user.id if message.from_user else None):
+    adm = _is_admin(message.from_user.id if message.from_user else None)
+    if not adm:
         await message.answer("📡 Kanallar — faqat admin.")
         return
     if message.from_user:
         _ch_flow.discard(message.from_user.id)
     await state.set_state(ChannelState.menu)
     async with async_session_factory() as session:
-        text = await _menu_text(session, _is_admin(message.from_user.id if message.from_user else None))
-    await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(
-        _is_admin(message.from_user.id if message.from_user else None)
-    ))
+        text = await _menu_text(session, True)
+        chans = await list_channels(session)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+    # v66: har bir kanal uchun bitta inline o'chirish tugmasi
+    ikb = _channels_inline(chans)
+    if ikb is not None:
+        await message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
 
 
 # ===================== /100 — kanallardan xabar yozib olish =====================
@@ -578,9 +633,15 @@ async def ask_remove(message: Message, state) -> None:
     _ch_flow.add(message.from_user.id)
     await state.set_state(ChannelState.awaiting_remove)
     await message.answer(
-        "➖ Qaysi kanalni o'chiramiz? <code>@username</code> yuboring.\nBekor: ⬅️ Orqaga.",
+        "➖ Qaysi kanalni o'chiramiz? Pastdagi tugmani bosing yoki "
+        "<code>@username</code> yuboring.\nBekor: ⬅️ Orqaga.",
         parse_mode="HTML", reply_markup=kb.channels_reply(True),
     )
+    async with async_session_factory() as session:
+        chans = await list_channels(session)
+    ikb = _channels_inline(chans)
+    if ikb is not None:
+        await message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
 
 
 @router.message(ChannelState.awaiting_remove, F.text == "⬅️ Orqaga")
@@ -607,10 +668,186 @@ async def do_remove(message: Message, state) -> None:
     async with async_session_factory() as session:
         ok, msg = await remove_channel(session, key)
         text = ("✅ " if ok else "⚠️ ") + msg + "\n\n" + await _menu_text(session, True)
+        chans = await list_channels(session)
     await state.set_state(ChannelState.menu)
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+    ikb = _channels_inline(chans)
+    if ikb is not None:
+        await message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
     if ok:
         _spawn(_reload_watcher())
+
+
+# =========== v66/v71: inline tugma orqali o'chirish (bir bosish) ===========
+
+async def _del_one(session, ch: dict) -> tuple[bool, str, list[dict]]:
+    """Bitta kanalni o'chiradi va qolganlar ro'yxatini qaytaradi."""
+    key = (ch.get("username") or "").strip().lstrip("@") or str(ch.get("chat_id") or "")
+    ok, msg = await remove_channel(session, key)
+    left = await list_channels(session)
+    return ok, msg, left
+
+
+def _snapshot(ch: dict) -> dict:
+    """Qaytarish uchun kanal nusxasi."""
+    return {
+        "username": (ch.get("username") or "") or None,
+        "chat_id": ch.get("chat_id"),
+        "title": ch.get("title") or "",
+        "kind": ch.get("kind") or ("public" if ch.get("username") else "private"),
+    }
+
+
+@router.callback_query(F.data.startswith("chdel:"))
+async def cb_del_pick(cq: CallbackQuery) -> None:
+    """🗑 tugmasi bosildi -> kanal DARHOL o'chiriladi (tasdiq yo'q, bir bosish)."""
+    uid = cq.from_user.id if cq.from_user else 0
+    if not _is_admin(uid):
+        await cq.answer("Faqat admin.", show_alert=True)
+        return
+    raw = (cq.data or "").split(":", 1)[1]
+    async with async_session_factory() as session:
+        chans = await list_channels(session)
+        if not raw.isdigit() or int(raw) >= len(chans):
+            await cq.answer("Kanal topilmadi — ro'yxatni yangilang.", show_alert=True)
+            return
+        ch = chans[int(raw)]
+        name = display_name(ch)
+        ok, msg, left = await _del_one(session, ch)
+        text = await _menu_text(session, True)
+    if ok:
+        _LAST_DEL[uid] = {"items": [_snapshot(ch)], "ts": datetime.now(timezone.utc)}
+        _spawn(_reload_watcher())
+    await cq.answer("✅ O'chirildi: " + name if ok else "⚠️ Xato")
+    if cq.message:
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        tail = "" if ok else "\n<i>Qaytadan urinib ko'ring.</i>"
+        await cq.message.answer(
+            ("\u2705 <b>O'chirildi:</b> " + _esc_html(name) + tail if ok
+             else "\u26A0\uFE0F " + _esc_html(msg)),
+            parse_mode="HTML", reply_markup=_undo_kb(ok),
+        )
+        await cq.message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+        ikb = _channels_inline(left)
+        if ikb is not None:
+            await cq.message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
+
+
+@router.callback_query(F.data.startswith("chdely:"))
+async def cb_del_yes(cq: CallbackQuery) -> None:
+    """Eski (v66) tasdiq tugmasi — moslik uchun: xuddi bitta bosish kabi o'chiradi."""
+    await cb_del_pick(cq)
+
+
+@router.callback_query(F.data == "chdelall")
+async def cb_del_all_ask(cq: CallbackQuery) -> None:
+    """«Hammasini o'chirish» — bu yerda tasdiq so'raladi (ko'p kanal)."""
+    if not _is_admin(cq.from_user.id if cq.from_user else None):
+        await cq.answer("Faqat admin.", show_alert=True)
+        return
+    async with async_session_factory() as session:
+        chans = await list_channels(session)
+    await cq.answer()
+    if cq.message:
+        await cq.message.answer(
+            "🗑 <b>Hamma kanal o'chirilsinmi?</b> (%d ta)\n"
+            "Keyin qaytarish tugmasi bilan qaytarish mumkin." % len(chans),
+            parse_mode="HTML", reply_markup=_del_confirm_kb(),
+        )
+
+
+@router.callback_query(F.data == "chdelyall")
+async def cb_del_all(cq: CallbackQuery) -> None:
+    """BARCHA kanallarni o'chiradi (bitta bosishda, tasdiqdan keyin)."""
+    uid = cq.from_user.id if cq.from_user else 0
+    if not _is_admin(uid):
+        await cq.answer("Faqat admin.", show_alert=True)
+        return
+    async with async_session_factory() as session:
+        chans = await list_channels(session)
+        snaps = [_snapshot(c) for c in chans]
+        n = 0
+        for ch in chans:
+            key = (ch.get("username") or "").strip().lstrip("@") or str(ch.get("chat_id") or "")
+            ok, _m = await remove_channel(session, key)
+            n += 1 if ok else 0
+        left = await list_channels(session)
+        text = await _menu_text(session, True)
+    if n:
+        _LAST_DEL[uid] = {"items": snaps, "ts": datetime.now(timezone.utc)}
+        _spawn(_reload_watcher())
+    await cq.answer("✅ %d ta o'chirildi" % n)
+    if cq.message:
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        await cq.message.answer(
+            "\u2705 <b>%d ta kanal o'chirildi.</b>" % n,
+            parse_mode="HTML", reply_markup=_undo_kb(bool(n)),
+        )
+        await cq.message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+        ikb = _channels_inline(left)
+        if ikb is not None:
+            await cq.message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
+
+
+@router.callback_query(F.data == "chundo")
+async def cb_del_undo(cq: CallbackQuery) -> None:
+    """«↩️ Qaytarish» — oxirgi o'chirilgan kanal(lar)ni qaytaradi."""
+    uid = cq.from_user.id if cq.from_user else 0
+    if not _is_admin(uid):
+        await cq.answer("Faqat admin.", show_alert=True)
+        return
+    saved = _LAST_DEL.pop(uid, None) or {}
+    items = saved.get("items") or []
+    if not items:
+        await cq.answer("Qaytarish uchun kanal yo'q.", show_alert=True)
+        return
+    back = 0
+    async with async_session_factory() as session:
+        for it in items:
+            try:
+                ok, _m, _ch = await add_channel(
+                    session, username=it.get("username"), chat_id=it.get("chat_id"),
+                    title=it.get("title") or "", kind=it.get("kind") or "public",
+                )
+                back += 1 if ok else 0
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CH] qaytarish: %s", exc)
+        text = await _menu_text(session, True)
+        left = await list_channels(session)
+    if back:
+        _spawn(_reload_watcher())
+    names = ", ".join((i.get("username") and "@" + i["username"])
+                      or (i.get("title") or str(i.get("chat_id"))) for i in items[:5])
+    await cq.answer("↩️ Qaytarildi: %d ta" % back)
+    if cq.message:
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        await cq.message.answer(
+            "\u21A9\uFE0F <b>Qaytarildi (%d ta):</b> %s" % (back, _esc_html(names)),
+            parse_mode="HTML", reply_markup=kb.channels_reply(True),
+        )
+        await cq.message.answer(text, parse_mode="HTML")
+        ikb = _channels_inline(left)
+        if ikb is not None:
+            await cq.message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
+
+
+@router.callback_query(F.data == "chdelno")
+async def cb_del_no(cq: CallbackQuery) -> None:
+    await cq.answer("Bekor qilindi.")
+    if cq.message:
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @router.message(Command("tozalash"))
