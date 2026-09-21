@@ -3,6 +3,13 @@
 Sessiya SystemLog(component='tg_session') da saqlanadi (yangi jadval YO'Q).
 API_ID/HASH: .env yoki SystemLog('tg_api').
 
+v52 tuzatishlari (Telegram kod yuborishni rad etganda):
+  * `SendCodeUnavailableError` ("all available options ... already used") tushunarli
+    o'zbekcha matnga aylantiriladi + qancha kutish kerakligi aytiladi.
+  * Ketma-ket kod so'rashga 60 soniya "sovutish" (cooldown) — flood kuchaymasin.
+  * Xato bo'lsa ESKI kod hash saqlanib qoladi (kelgan kod ishlayveradi).
+  * `sms` endi: Telethon force_sms ishlamaydi -> qo'shimcha "qayta yuborish" urinishi.
+
 v51 tuzatishlari (kod kelmayapti / akkaunt chiqib ketdi muammolari):
   * Kod QANDAY yuborilgani aytiladi (ilova / SMS / qo'ng'iroq) — Telegram yangi
     api_id bilan ko'pincha SMS yubormaydi, kodni Telegram ilovasiga yozadi.
@@ -13,6 +20,7 @@ v51 tuzatishlari (kod kelmayapti / akkaunt chiqib ketdi muammolari):
 """
 from __future__ import annotations
 
+import time
 import unicodedata
 
 from app.core.config import get_settings
@@ -33,6 +41,7 @@ _pending = None  # TelegramClient during login
 _phone = ""
 _code_hash = ""
 _delivery = ""   # kod qanday yuborildi: app | sms | call | flash
+_last_request_ts = 0.0   # oxirgi kod so'rovi vaqti (cooldown uchun)
 
 _CLIENT_KW = dict(
     device_model="Desktop",
@@ -98,6 +107,20 @@ def _human_err(exc: BaseException) -> str:
     name = type(exc).__name__
     text = str(exc)
     low = f"{name} {text}".lower()
+    if ("sendcodeunavailable" in low or "all available options" in low
+            or "send_code_unavailable" in low):
+        return (
+            "Telegram hozir bu raqamga yangi kod yubormayapti "
+            "(barcha yuborish usullari ishlatilgan).\n"
+            "Odatda bu cheklov 30 daqiqadan 24 soatgacha turadi.\n"
+            "Nima qilish kerak:\n"
+            "1) Telegram ilovangizda <b>«Telegram»</b> chatini ochib ko'ring — "
+            "kod o'sha yerga kelgan bo'lishi mumkin (u xabar o'chib ketmaydi).\n"
+            "2) 30-60 daqiqa kutib, keyin <b>qayta</b> deb yozing.\n"
+            "3) Kutish davomida kod so'ramang — har urinish cheklovni uzaytiradi.\n"
+            "4) Akkaunt kerak bo'lmasa: kanalga botni admin qilib qo'shsangiz, "
+            "postlar botga to'g'ridan-to'g'ri keladi."
+        )
     if "flood" in low:
         return ("Telegram juda ko'p urinish uchun kutish qo'ydi — "
                 + _wait_text(flood_seconds(exc))
@@ -280,13 +303,17 @@ async def _ensure_pending() -> bool:
 async def start_login(api_id: int, api_hash: str, phone: str,
                       force_sms: bool = False) -> tuple[str, str]:
     """Kod yuboriladi. (xato_matni, yetkazish_turi) qaytaradi."""
-    global _pending, _phone, _code_hash, _delivery
+    global _pending, _phone, _code_hash, _delivery, _last_request_ts
     try:
         import telethon  # noqa: F401
     except ImportError:
         return "Telethon o'rnatilmagan. Deploy qiling.", ""
     await save_api(api_id, api_hash)
     phone = phone.strip()
+    left = cooldown_left()
+    if left > 0 and _phone == phone:
+        return (f"⏳ Kod yaqinda so'ralgan. Yana {left} soniya kutib, "
+                f"<b>qayta</b> deb yozing.", "")
     await _drop_client()
     try:
         client = make_client("", int(api_id), api_hash)
@@ -302,6 +329,7 @@ async def start_login(api_id: int, api_hash: str, phone: str,
         _phone = phone
         _code_hash = result.phone_code_hash
         _delivery = delivery_of(result)
+        _last_request_ts = time.time()
         kind = _delivery
         await _dump_pending()
         logger.info("[TG-USER] kod yuborildi: %s (yetkazish=%s, force_sms=%s)",
@@ -313,36 +341,68 @@ async def start_login(api_id: int, api_hash: str, phone: str,
         return f"Kod yuborilmadi: {_human_err(exc)}", ""
 
 
+COOLDOWN_SECONDS = 60
+
+
+def cooldown_left() -> int:
+    """Kod so'rashga qolgan "sovutish" vaqti (sekund)."""
+    if not _last_request_ts:
+        return 0
+    left = COOLDOWN_SECONDS - int(time.time() - _last_request_ts)
+    return left if left > 0 else 0
+
+
 async def resend_code(force_sms: bool = False) -> tuple[str, str]:
-    """Yangi kod so'raydi. (xato_matni, yetkazish_turi)."""
-    global _code_hash, _delivery
+    """Yangi kod so'raydi. (xato_matni, yetkazish_turi).
+
+    force_sms: Telethon'da endi ishlamaydi (deprecated) — shuning uchun bu
+    "qo'shimcha urinish" (ResendCodeRequest yo'li) sifatida ishlaydi.
+    Xato bo'lsa ESKI kod hash saqlanadi — kelgan kod ishlayveradi.
+    """
+    global _code_hash, _delivery, _last_request_ts
     if not await _ensure_pending():
         return "Sessiya yo'q. /akkaunt bilan qayta boshlang.", ""
+    left = cooldown_left()
+    if left > 0:
+        return (f"⏳ Juda tez. Yana {left} soniya kutib, <b>qayta</b> yozing.\n"
+                "(Ketma-ket so'rov Telegramda cheklov qo'zg'atadi.)", "")
+    old_hash, old_delivery = _code_hash, _delivery
     try:
         if force_sms:
+            # Telethon force_sms ni qo'llamaydi — to'g'ridan-to'g'ri ResendCodeRequest
+            result = None
             try:
-                result = await _pending.send_code_request(_phone, force_sms=True)
-            except TypeError:
+                from telethon.tl.functions.auth import ResendCodeRequest
+                result = await _pending(ResendCodeRequest(_phone, _code_hash))
+            except Exception:  # noqa: BLE001
+                logger.info("[TG-USER] ResendCodeRequest ishlamadi — oddiy so'rov")
+                result = None
+            if result is None:
                 result = await _pending.send_code_request(_phone)
         else:
             result = await _pending.send_code_request(_phone)
-        _code_hash = result.phone_code_hash
+        _code_hash = result.phone_code_hash or _code_hash
         _delivery = delivery_of(result)
+        _last_request_ts = time.time()
         await _dump_pending()
-        logger.info("[TG-USER] kod qayta yuborildi (yetkazish=%s, force_sms=%s)",
-                    _delivery, force_sms)
+        logger.info("[TG-USER] kod qayta yuborildi (yetkazish=%s, urinish=%s)",
+                    _delivery, "sms" if force_sms else "oddiy")
         return "", _delivery
     except Exception as exc:  # noqa: BLE001
         logger.exception("[TG-USER] resend: %s", exc)
+        # eski kod hash tiklanadi — avval kelgan kod ishlayveradi
+        _code_hash, _delivery = old_hash, old_delivery
+        await _dump_pending()
         return f"Yangi kod kelmadi: {_human_err(exc)}", ""
 
 
 async def pending_info() -> dict:
-    """Kutilayotgan login haqida: telefon oxiri va kod qanday yuborilgani."""
-    out = {"phone": "", "delivery": ""}
+    """Kutilayotgan login: telefon, yetkazish turi, qolgan cooldown."""
+    out = {"phone": "", "delivery": "", "cooldown": cooldown_left()}
     if await _ensure_pending():
         out["phone"] = _phone
         out["delivery"] = _delivery
+        out["cooldown"] = cooldown_left()
         return out
     async with async_session_factory() as db:
         row = await load_json_log(db, PENDING_COMPONENT)

@@ -200,7 +200,10 @@ async def _menu_text(session, is_admin: bool) -> str:
         "",
         "1️⃣ <b>Eng ishonchli:</b> kanal xabarini (matn/rasm) shu botga <b>forward</b> qiling.",
         "AI SIGNAL ni yuboradi, EMAS ni faqat hisobotga yozadi. Botni kanalga qo'shish shart emas.",
-        "2️⃣ Avtomatik: <b>👤 Akkaunt</b> ulansa, AI kanallarni o'zi o'qiydi.",
+        "2️⃣ Ommaviy kanal uchun: <b>botni kanalga admin</b> qilib qo'shsangiz, "
+        "postlar to'g'ridan-to'g'ri botga keladi (akkaunt kerak emas).",
+        "3️⃣ Avtomatik: <b>👤 Akkaunt</b> ulansa, AI kanallarni o'zi o'qiydi "
+        "(yopiq kanallar ham).",
         "Yopiq kanal: akkauntingiz obuna bo'lgan bo'lishi kerak.",
     ]
     if is_admin:
@@ -550,17 +553,20 @@ def _only_digits(text: str | None) -> str:
     return "".join(c for c in (text or "") if c.isdigit())
 
 
-def _code_hint(delivery: str = "") -> str:
+def _code_hint(delivery: str = "", phone: str = "") -> str:
     from app.services.channel_user import delivery_text
+    raqam = f"\n📱 Raqam: <code>{phone}</code> — kod aynan shu raqamning "\
+            f"Telegram akkauntiga keladi." if phone else ""
     return (
-        delivery_text(delivery) + "\n\n"
+        delivery_text(delivery) + raqam + "\n\n"
         "Kodni <b>shundayligicha</b> yuboring — faqat raqamlar ham bo'ladi:\n"
         "<code>12345</code>  yoki  <code>A12345</code>  yoki  <code>12 345</code>\n"
         "Harf va bo'shliqni bot o'zi olib tashlaydi.\n\n"
-        "SMS kelmagan bo'lsa: <b>sms</b> deb yozing (majburiy SMS).\n"
-        "Yangi kod kerak bo'lsa: <b>qayta</b>\n"
+        "Kod kelmasa: <b>qayta</b> (yana urinish) · <b>sms</b> (qo'shimcha urinish)\n"
         "Bekor qilish: <b>bekor</b>\n\n"
-        "⚠️ Kod so'rashni tez-tez takrorlamang — Telegram kutish (flood) qo'yadi."
+        "⚠️ Kod so'rashni tez-tez takrorlamang — Telegram cheklov (flood) qo'yadi.\n"
+        "💡 Akkaunt kerak bo'lmasa: kanalga <b>botni admin</b> qilib qo'shsangiz, "
+        "postlar to'g'ridan-to'g'ri botga keladi."
     )
 
 
@@ -669,7 +675,7 @@ async def account_wizard(message: Message, state) -> None:
             tmp["phone"] = phone
             tmp["step"] = "code"
             tmp["delivery"] = kind
-            await message.answer(_code_hint(kind), parse_mode="HTML")
+            await message.answer(_code_hint(kind, phone), parse_mode="HTML")
             return
         if step == "code":
             from app.services.channel_user import finish_login, resend_code, pending_info
@@ -683,11 +689,17 @@ async def account_wizard(message: Message, state) -> None:
                 force = low == "sms"
                 err, kind = await resend_code(force_sms=force)
                 if err:
-                    await message.answer(f"⚠️ {err}", parse_mode="HTML")
+                    head = "⚠️ Qo'shimcha urinish ishlamadi.\n" if force else ""
+                    await message.answer(head + err, parse_mode="HTML")
                     return
                 tmp["delivery"] = kind
-                head = "📩 Majburiy SMS so'raldi." if force else "🔄 Yangi kod so'raldi."
-                await message.answer(head + "\n\n" + _code_hint(kind), parse_mode="HTML")
+                head = ("🔄 Qo'shimcha urinish qilindi (Telegram SMS majburiy qilib "
+                        "bo'lmaydi — qarorni o'zi qabul qiladi).") if force else \
+                       "🔄 Yangi kod so'raldi."
+                await message.answer(
+                    head + "\n\n" + _code_hint(kind, tmp.get("phone") or ""),
+                    parse_mode="HTML",
+                )
                 return
             code_in = _digit_code(t)
             if not code_in:
@@ -698,7 +710,7 @@ async def account_wizard(message: Message, state) -> None:
                 await message.answer(
                     "⚠️ Kodni raqam bilan yuboring (3-8 xona).\n"
                     "Masalan: <code>12345</code> yoki <code>A12345</code>\n"
-                    "SMS kerak: <b>sms</b> · Yangi kod: <b>qayta</b>",
+                    "Yangi urinish: <b>qayta</b> · qo'shimcha urinish: <b>sms</b>",
                     parse_mode="HTML",
                 )
                 return
