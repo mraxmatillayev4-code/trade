@@ -1,4 +1,4 @@
-"""SINO Local AI (LAI v45) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
+"""SINO Local AI (LAI v46) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
 
 Nima qiladi (hammasi mahalliy, API key kerak emas):
   1) Normalizatsiya: o'zbek/rus/ingliz/arab yozuvi, emoji, OCR xatolari (0<->O, 1<->l, 5<->S ...)
@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-45"
+__version__ = "SINO-LAI-46"
 
 import difflib
 import re

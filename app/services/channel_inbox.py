@@ -49,6 +49,87 @@ _lock = asyncio.Lock()
 _seen: set[tuple] = set()
 
 
+
+# ======================= v46: o'z-o'zini diagnostika =======================
+_DIAG: dict = {}
+_DIAG_VER = "v46"
+_boot_sent = False
+_sig_sent = False
+
+
+def _ver_info() -> str:
+    """Versiya + muhit haqida qisqa ma'lumot (admin xabariga)."""
+    try:
+        from app.services import local_ai as _lai
+        lai = str(getattr(_lai, "__version__", "?"))
+    except Exception:  # noqa: BLE001
+        lai = "yo'q"
+    try:
+        key = "bor" if getattr(_settings or get_settings(), "ai_api_key", "") else "yo'q"
+    except Exception:  # noqa: BLE001
+        key = "?"
+    ocr = "?"
+    try:
+        import shutil
+        from app.services import channel_ocr as _ocr
+        ocr = getattr(_ocr, "_TESS_EXE", "") or (shutil.which("tesseract") or "topilmadi")
+    except Exception:  # noqa: BLE001
+        pass
+    return f"lokal AI: <b>{lai}</b> | AI kaliti: {key} | tesseract: <code>{_esc(ocr)}</code>"
+
+
+async def _diag(key, src: str, kind: str, reason: str = "", sample: str = "") -> None:
+    """Kanal bo'yicha hisob + admin ogohlantirishlari. Hech qachon xato bermaydi."""
+    global _boot_sent, _sig_sent
+    try:
+        import time as _t
+        now = _t.time()
+        d = _DIAG.setdefault(str(key or src or "?"), {
+            "read": 0, "sig": 0, "emas": 0, "err": 0, "skip": 0,
+            "why": [], "smp": [], "ts": now,
+        })
+        d["read"] += 1
+        if kind in ("sig", "emas", "err", "skip"):
+            d[kind] += 1
+        elif kind == "closed":
+            d["read"] -= 1
+        if reason:
+            d["why"] = ([reason] + d["why"])[:3]
+        if sample:
+            _sm = ((sample or "").replace("\n", " "))[:110]
+            d["smp"] = ([_sm] + d["smp"])[:3]
+
+        if not _boot_sent:
+            _boot_sent = True
+            await tell_admin(
+                f"\U0001F916 <b>SINO AI {_DIAG_VER} faol</b>\n{_ver_info()}\n"
+                f"Birinchi xabar: <b>{_esc(src)}</b>"
+            )
+        if kind == "sig" and not _sig_sent:
+            _sig_sent = True
+            await tell_admin(f"\u2705 <b>Birinchi signal o'qildi</b> — {_esc(src)}")
+        _na = int(d.get("alerts") or 0)
+        if (d["sig"] == 0 and d["read"] >= 12 + 25 * _na
+                and now - float(d.get("ts") or 0) >= 120):
+            d["alerts"] = _na + 1
+            d["ts"] = now
+            why = "\n".join(f"\u2022 {_esc(w)}" for w in d["why"][:3]) or "\u2022 sabab yo'q"
+            smp = "\n".join(f"\u2022 <code>{_esc(s)}</code>" for s in d["smp"][:3]) or "\u2022 -"
+            await tell_admin(
+                f"\u26A0\uFE0F <b>DIAGNOSTIKA</b> — {_esc(src)}\n"
+                f"O'qildi: <b>{d['read']}</b> | SIGNAL: <b>0</b> | EMAS: {d['emas']} | "
+                f"xato: {d['err']} | o'tkazildi: {d['skip']}\n"
+                f"Sabablar:\n{why}\nNamunalar:\n{smp}"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _diag_skip(src: str, key, sample: str) -> None:
+    await _diag(key, src, "skip", "ro'yxatda yo'q (chan_id/username mos kelmadi)", sample)
+
+# ===========================================================================
+
 def bind(candles, paper, tracker, notifier, settings: Settings) -> None:
     global _candles, _paper, _tracker, _notifier, _settings
     _candles, _paper, _tracker, _notifier, _settings = candles, paper, tracker, notifier, settings
@@ -315,8 +396,10 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
             src_ch["title"] = title
         src = display_name(src_ch)
 
+        skey = stat_key(uname or None, chat_id)
         if listed is None and require_listed:
-            logger.info("[CH] tashlandi (ro'yxatda yo'q): %s", src)
+            logger.warning("[CH-SKIP] ro'yxatda yo'q: %s (chat_id=%s @%s)", src, chat_id, uname)
+            await _diag_skip(src, skey, raw or text or "")
             return "skip"
 
         rec = dict(listed) if listed is not None else src_ch
@@ -329,6 +412,7 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
             sm = (cur.symbol if cur else None) or "XAUUSDT"
             n = await flatten(session, symbol=sm, price=_last_px(sm))
             logger.info("[CH] yopish %s n=%d", src, n)
+            await _diag(skey, src, "closed", "yopish xabari", text or "")
             if n and _notifier is not None:
                 try:
                     await _notifier.send_event(
@@ -349,6 +433,7 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                     parsed = apply_levels(parsed, blob)
 
         # AI zaxira: lokal parser topa olmasa - kanal AI (emoji/rasm/persian/LLM)
+        ai_reason = ""
         if parsed is None or not (parsed.direction and parsed.symbol):
             try:
                 from app.services import channel_ai
@@ -357,8 +442,10 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                 if ai_img and (raw or "").strip() != (text or "").strip():
                     ai_img = None  # OCR allaqachon ishlagan, ikkinchi marta o'qimaymiz
                 ai = await channel_ai.interpret_async(raw or text or None, ai_img)
+                ai_reason = str(getattr(channel_ai, "last_reason", "") or "")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[CH] AI fallback: %s", exc)
+                logger.warning("[CH] AI fallback xatosi: %s: %s", type(exc).__name__, exc)
+                ai_reason = f"AI xatosi: {type(exc).__name__}"
                 ai = None
             if ai is not None:
                 if parsed is None:
@@ -383,14 +470,17 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                 await record_read(session, rec, False)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[CH] stats: %s", exc)
-            logger.info("[CH] %s EMAS — chatga yuborilmadi: %s", src, (raw or "")[:80])
+            logger.warning("[CH-EMAS] %s | sabab=%s | matn=%s",
+                           src, ai_reason or "-", (raw or text or "")[:120])
+            await _diag(skey, src, "emas", ai_reason or "sabab aniqlanmadi", raw or text or "")
             return "not_signal"
 
-        logger.info(
-            "[CH] parse %s %s %s entry=%s sl=%s zona=%s/%s",
+        logger.warning(
+            "[CH-SIG] %s | %s %s entry=%s sl=%s zona=%s/%s",
             src, parsed.direction, parsed.symbol, parsed.entry, parsed.sl,
             getattr(parsed, "zone_low", None), getattr(parsed, "zone_high", None),
         )
+        await _diag(skey, src, "sig", "", raw or text or "")
 
         if chat_id:
             try:
@@ -402,7 +492,39 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
         try:
             verdict = await _save(session, rec, parsed, settings, src)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[CH] saqlash: %s", exc)
+            logger.warning("[CH-SAVE-ERR] %s: %s", type(exc).__name__, exc)
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            fixed = ""
+            try:
+                fixed = await _ensure_schema(session, force=True)
+            except Exception:  # noqa: BLE001
+                fixed = ""
+            if fixed:
+                try:
+                    verdict = await _save(session, rec, parsed, settings, src)
+                    logger.warning("[CH-SAVE-RETRY] sxema tuzatildi (%s) → %s",
+                                   fixed, verdict)
+                    if verdict == "ok":
+                        await _diag(skey, src, "sig", "", raw or text or "")
+                        try:
+                            await record_read(session, rec, True)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return verdict
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning("[CH-SAVE-RETRY-ERR] %s: %s", type(exc2).__name__, exc2)
+            try:
+                await tell_admin(
+                    "\u26A0\uFE0F <b>Saqlashda xato</b>\n"
+                    f"<code>{_esc(type(exc).__name__)}: {_esc(str(exc))[:240]}</code>\n"
+                    f"Signal: {_esc(parsed.direction)} {_esc(parsed.symbol)}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            await _diag(skey, src, "err", f"saqlash: {type(exc).__name__}", text or "")
             try:
                 await record_read(session, rec, False)
             except Exception:  # noqa: BLE001
@@ -416,7 +538,85 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
         return verdict
 
 
+
+# ===================== v46: DB sxemasini o'zi tuzatish =====================
+_SCHEMA_DONE = False
+
+
+async def _ensure_schema(session, force: bool = False) -> str:
+    """Modelda bor, lekin bazada yo'q ustunlarni qo'shadi (Postgres).
+
+    Eski bazada yangi ustun bo'lmasa har bir INSERT xato beradi — shu tufayli
+    hamma signal "EMAS" bo'lib qolardi. Bu funksiya uni o'zi tuzatadi.
+    """
+    global _SCHEMA_DONE
+    if _SCHEMA_DONE and not force:
+        return ""
+    _SCHEMA_DONE = True
+    added: list = []
+    try:
+        from sqlalchemy import inspect, text
+
+        from app.database.models.signal import Signal, SignalConfirmation
+
+        models = [Signal, SignalConfirmation]
+        try:
+            from app.database.models.stats import StrategyStat
+            models.append(StrategyStat)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from app.database.models.system import SystemLog
+            models.append(SystemLog)
+        except Exception:  # noqa: BLE001
+            pass
+
+        def _work(sync_conn):
+            insp = inspect(sync_conn)
+            names = set(insp.get_table_names())
+            for model in models:
+                t = model.__table__
+                if t.name not in names:
+                    try:
+                        t.create(sync_conn, checkfirst=True)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[CH-SCHEMA] %s yaratilmadi: %s", t.name, exc)
+                    continue
+                have = {c["name"] for c in insp.get_columns(t.name)}
+                for col in t.columns:
+                    if col.name in have:
+                        continue
+                    try:
+                        ddl = col.type.compile(sync_conn.dialect)
+                        sync_conn.execute(text(
+                            f'ALTER TABLE "{t.name}" ADD COLUMN "{col.name}" {ddl}'
+                        ))
+                        added.append(f"{t.name}.{col.name}")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[CH-SCHEMA] %s.%s: %s", t.name, col.name, exc)
+
+        try:
+            dialect = session.bind.dialect.name if session.bind is not None else ""
+        except Exception:  # noqa: BLE001
+            dialect = ""
+        if dialect and dialect not in ("postgresql", "sqlite"):
+            return ""
+        await session.run_sync(_work)
+        if added:
+            logger.warning("[CH-SCHEMA] yetishmayotgan ustunlar qo'shildi: %s",
+                           ", ".join(added))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH-SCHEMA] tekshiruv xatosi: %s", exc)
+    return ", ".join(added)
+
+# ==========================================================================
+
 async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
+    # v46: jadval ustunlari joyidami — yo'q bo'lsa qo'shamiz
+    try:
+        await _ensure_schema(session)
+    except Exception as _se:  # noqa: BLE001
+        logger.warning('[CH-SCHEMA] %s', _se)
     symbol = parsed.symbol
     timeframe = "1m"
     if getattr(parsed, "tf_explicit", False) and parsed.timeframe in (
@@ -503,7 +703,11 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
         f"{parsed.direction} {symbol} {timeframe}\n"
         f"<code>{snippet}</code>"
     )
-    total = await crud.count_signals(session)
+    total = 0
+    try:
+        total = await crud.count_signals(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] count_signals: %s", exc)
 
     def _mk() -> Signal:
         return Signal(
@@ -538,13 +742,28 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
             return "error"
 
     await session.refresh(signal)
-    session.add(SignalConfirmation(
-        signal_id=signal.id, strategy_name=sk,
-        direction=direction.value, score=6.5, confidence=60.0,
-        reason=f"Kanal {src}",
-        indicators_json=_dumps_json({"channel": src}),
-    ))
-    await session.commit()
+    try:
+        session.add(SignalConfirmation(
+            signal_id=signal.id, strategy_name=sk,
+            direction=direction.value, score=6.5, confidence=60.0,
+            reason=f"Kanal {src}",
+            indicators_json=_dumps_json({"channel": src}),
+        ))
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        # signal allaqachon yozilgan — tasdiq yozilmasa ham u saqlanadi
+        logger.warning("[CH] tasdiq yozilmadi: %s: %s", type(exc).__name__, exc)
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await tell_admin(
+                "\u26A0\uFE0F Signal saqlandi, lekin tasdiq (SignalConfirmation) yozilmadi: "
+                f"<code>{_esc(type(exc).__name__)}: {_esc(str(exc))[:180]}</code>"
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     if _paper is not None:
         try:

@@ -15,6 +15,10 @@ from app.core.symbols import resolve_symbol
 from app.services.channel_ocr import ocr_image
 from app.services.channel_parse import ParsedSignal, parse_signal
 from app.services.local_ai import analyze_ex as _lai_ex
+try:
+    from app.services.local_ai import __version__ as _lai_ver
+except Exception:  # noqa: BLE001
+    _lai_ver = '?'
 
 logger = get_logger(__name__)
 
@@ -142,7 +146,12 @@ def interpret(text: str | None, image_bytes: bytes | None = None) -> ParsedSigna
 
 
 def _classify(caption: str, blob: str, has_image: bool, has_ocr: bool):
-    _lp, _lwhy, _lveto = _lai_ex(blob or caption or '', '', bool(has_image))
+    # v46: mahalliy AI xatosi hech qachon oqimni to'xtatmasin
+    try:
+        _lp, _lwhy, _lveto = _lai_ex(blob or caption or '', '', bool(has_image))
+    except Exception as _le:  # noqa: BLE001
+        logger.warning('[CH-AI] lokal AI xato: %s: %s', type(_le).__name__, _le)
+        _lp, _lwhy, _lveto = None, '', False
     if _lp is not None:
         return _lp, 'lokal-ai'
     if _lveto:
@@ -201,7 +210,7 @@ async def interpret_async(text: str | None,
             logger.info("[CH-AI] SIGNAL(LLM) %s %s", llm.direction, llm.symbol)
             return llm
     last_reason = reason
-    logger.info("[CH-AI] EMAS (%s)", reason)
+    logger.warning("[CH-AI] EMAS (%s) | %s", reason, snippet or "(bosh)")
     return None
 
 
