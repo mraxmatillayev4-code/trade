@@ -632,14 +632,19 @@ async def qr_step() -> dict:
     try:
         user = await _qr_obj.wait()
     except asyncio.TimeoutError:
+        qr = _qr_obj
+        if qr is None:                       # shu orada to'xtatilgan
+            return {"state": "error", "msg": "QR oqimi to'xtatilgan."}
         try:
-            await _qr_obj.recreate()
+            await qr.recreate()
         except Exception as exc:  # noqa: BLE001
             logger.exception("[TG-QR] yangilash: %s", exc)
             msg = _human_err(exc)
             await qr_cancel()
             return {"state": "error", "msg": msg}
-        return {"state": "new", "link": _qr_obj.url, "qr": _qr_png(_qr_obj.url)}
+        if _qr_obj is None:                  # recreate paytida to'xtatilgan
+            return {"state": "error", "msg": "QR oqimi to'xtatilgan."}
+        return {"state": "new", "link": qr.url, "qr": _qr_png(qr.url)}
     except Exception as exc:  # noqa: BLE001
         if type(exc).__name__ == "SessionPasswordNeededError":
             _qr_state = "password"

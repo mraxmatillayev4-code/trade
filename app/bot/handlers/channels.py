@@ -10,8 +10,10 @@ from aiogram.filters import Command, Filter
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 from sqlalchemy import select
@@ -637,10 +639,11 @@ async def account_start(message: Message, state) -> None:
 
 
 def _qr_kb(link: str) -> InlineKeyboardMarkup:
-    """«Havolani ochish» tugmasi (tg://login -> Telegram o'zi tasdiqlaydi)."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="\U0001F449 Havolani ochish (bosing)", url=link),
-    ]])
+    """«Havolani ochish» + «To'xtatish» tugmalari (tg://login ni Telegram o'zi tasdiqlaydi)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\U0001F449 Havolani ochish (bosing)", url=link)],
+        [InlineKeyboardButton(text="\u23F9 To'xtatish", callback_data="qrstop")],
+    ])
 
 
 def _qr_caption() -> str:
@@ -650,23 +653,44 @@ def _qr_caption() -> str:
         "2) Telegram «Kirishni tasdiqlaysizmi?» deb so'raydi -> <b>Tasdiqlash</b>.\n\n"
         "Tugma ishlamasa: rasmdagi QR ni Telegram o'rnatilgan boshqa qurilma "
         "(kompyuter/ikkinchi telefon) bilan skanerlang.\n\n"
-        f"\u23F3 Havola ~{_QR_TTL} soniyada eskiradi — eskirsa yangisini yuboraman.\n"
-        "Bekor qilish: <b>bekor</b>"
+        f"\u23F3 Havola ~{_QR_TTL} soniyada eskiradi — shu xabarning O'ZI yangilanib turadi "
+        "(yangi xabar kelmaydi).\n"
+        "\u2139\uFE0F Telegram ilovangiz (telefon yoki Desktop) <b>so'nggi versiyada</b> bo'lsin: "
+        "eski versiyada «app version is outdated» xatosi chiqadi.\n"
+        "To'xtatish: <b>bekor</b> yoki pastdagi <b>\u23F9 To'xtatish</b> tugmasi"
     )
 
 
-async def _qr_send(message: Message, link: str, png) -> None:
+async def _qr_send(message: Message, link: str, png, target=None):
+    """QR xabari: `target` bo'lsa O'SHA xabar tahrirlanadi (yangi xabar YUBORILMAYDI)."""
     caption = _qr_caption()
+    if target is not None:
+        if png:
+            try:
+                await target.edit_media(
+                    media=InputMediaPhoto(
+                        media=BufferedInputFile(png, filename="sino_qr.png"),
+                        caption=caption, parse_mode="HTML",
+                    ),
+                    reply_markup=_qr_kb(link),
+                )
+                return target
+            except Exception as exc:  # noqa: BLE001
+                logger.info("[AKKAUNT] QR rasm tahrirlanmadi: %s", exc)
+        try:
+            await target.edit_reply_markup(reply_markup=_qr_kb(link))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[AKKAUNT] QR tugma tahrirlanmadi: %s", exc)
+        return target
     try:
         if png:
-            await message.answer_photo(
+            return await message.answer_photo(
                 BufferedInputFile(png, filename="sino_qr.png"),
                 caption=caption, parse_mode="HTML", reply_markup=_qr_kb(link),
             )
-            return
     except Exception as exc:  # noqa: BLE001
         logger.warning("[AKKAUNT] QR rasm yuborilmadi: %s", exc)
-    await message.answer(caption, parse_mode="HTML", reply_markup=_qr_kb(link))
+    return await message.answer(caption, parse_mode="HTML", reply_markup=_qr_kb(link))
 
 
 async def _login_done(message: Message) -> None:
@@ -691,15 +715,23 @@ async def _login_done(message: Message) -> None:
     )
 
 
-async def _qr_loop(message: Message) -> None:
-    """Havolani har eskirganda yangilab, tasdiqlanishini kutadi (max ~10 daqiqa)."""
-    from app.services.channel_user import qr_step
+async def _qr_loop(message: Message, msg=None) -> None:
+    """Havolani bitta xabarni TAHRIRLAB yangilab turadi va tasdiqni kutadi."""
+    from app.services.channel_user import qr_active, qr_step
     uid = message.from_user.id
-    for _ in range(20):
+    for _ in range(60):
+        if not qr_active():
+            return                    # to'xtatildi: «bekor» yoki ⏹ tugma
         res = await qr_step()
         state_name = res.get("state")
         if state_name == "ok":
             _login_tmp.pop(uid, None)
+            if msg is not None:
+                try:
+                    await msg.edit_caption(caption="\u2705 Tasdiqlandi.", parse_mode="HTML")
+                    await msg.edit_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
             await _login_done(message)
             return
         if state_name == "password":
@@ -712,11 +744,13 @@ async def _qr_loop(message: Message) -> None:
             )
             return
         if state_name == "new":
-            await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
+            msg = await _qr_send(message, str(res.get("link") or ""), res.get("qr"), target=msg)
             continue
+        if not qr_active():
+            return          # to'xtatilgan (bekor / ⏹) — jimgina chiqamiz, xabar yozmaymiz
         await message.answer("⚠️ " + str(res.get("msg") or "QR xatosi"))
         return
-    await message.answer("\u23F3 Vaqt tugadi (havolalar eskirib bo'ldi). /qr bilan qayta urinib ko'ring.")
+    await message.answer("\u23F3 Vaqt tugadi. /qr bilan qayta urinib ko'ring.")
 
 
 @router.message(Command("qr"))
@@ -733,8 +767,32 @@ async def account_qr(message: Message, state) -> None:
     uid = message.from_user.id
     await state.clear()
     _login_tmp[uid] = {"step": "qr"}
-    await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
-    await _qr_loop(message)
+    first = await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
+    await _qr_loop(message, first)
+
+
+@router.callback_query(F.data == "qrstop")
+async def qr_stop(cb: CallbackQuery, state) -> None:
+    """\u23F9 tugma — QR oqimini shu zahoti to'xtatadi (xabar oqimi ham to'xtaydi)."""
+    from app.services.channel_user import qr_cancel
+    await qr_cancel()
+    if cb.from_user:
+        _login_tmp.pop(cb.from_user.id, None)
+    try:
+        await cb.message.edit_caption(
+            caption="\u23F9 QR to'xtatildi. /qr bilan qayta boshlashingiz mumkin.",
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await cb.answer("QR to'xtatildi")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.message(LoginInProgress(), F.text)
