@@ -22,6 +22,8 @@ _SKIP_LOGIN = {
     "📚 Strategiyalar",
     "📈 Statistika",
     "💼 Hisob (paper)",
+    "🔎 Jonli kuzatuv",
+    "🏦 Broker",
     "🗓 Hisobotlar",
     "💰 Balansni o'rnatish",
     "🤖 Avto-trade: yoqish/o'chirish",

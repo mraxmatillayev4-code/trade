@@ -29,6 +29,23 @@ class WebhookPayload(BaseModel):
     secret: str | None = None
 
 
+class BrkToken(BaseModel):
+    """v74: ko'prik chaqiruvlari uchun token."""
+    token: str = ""
+
+
+class BrkAck(BrkToken):
+    results: list[dict] = []
+
+
+class BrkReport(BrkToken):
+    balance: float | None = None
+    equity: float | None = None
+    positions: list[dict] | None = None
+    bridge_ver: str | None = None
+    error: str | None = None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Trading Signal Bot API", version="1.0.0")
     settings = get_settings()
@@ -49,6 +66,42 @@ def create_app() -> FastAPI:
     @app.api_route("/health", methods=["GET", "HEAD"])
     async def health() -> dict:
         return {"status": "ok", "time": to_tashkent().isoformat()}
+
+    from app.services import broker as _brk
+
+    @app.post("/api/broker/pull")
+    async def broker_pull(payload: BrkToken) -> dict:
+        """Ko'prik (kompyuter) navbatni oladi: ochish/yopish buyruqlari."""
+        async with async_session_factory() as session:
+            return await _brk.pull(session, payload.token)
+
+    @app.post("/api/broker/ack")
+    async def broker_ack(payload: BrkAck) -> dict:
+        """Ko'prik natijani qaytaradi: ticket / narx / xato."""
+        async with async_session_factory() as session:
+            return await _brk.ack(session, payload.token, payload.results)
+
+    @app.post("/api/broker/report")
+    async def broker_report(payload: BrkReport) -> dict:
+        """Ko'prik hisob holatini yuboradi (balans, equity, pozitsiyalar)."""
+        async with async_session_factory() as session:
+            return await _brk.report(
+                session, payload.token, balance=payload.balance, equity=payload.equity,
+                positions=payload.positions, bridge_ver=payload.bridge_ver,
+                error=payload.error,
+            )
+
+    @app.post("/api/broker/status")
+    async def broker_status(payload: BrkToken) -> dict:
+        """Holat (token bilan) — ko'prik va bot bir xil ma'lumotni ko'radi."""
+        async with async_session_factory() as session:
+            cfg = await _brk.load_cfg(session)
+            if not _brk.is_ready(cfg) or payload.token != cfg.get("token"):
+                return {"ok": False, "error": "token noto'g'ri"}
+            data = await _brk.summary(session)
+            data.pop("password", None)
+            return {"ok": True, "cfg": data,
+                    "state": _brk.link_state(cfg)}
 
     @app.get("/api/signals")
     async def list_signals(limit: int = 20, direction: str | None = None) -> list[dict]:

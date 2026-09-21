@@ -133,6 +133,7 @@ class Application:
                 ("100ocr", "🔤 Rasmlardan yozuvni o'qish (OCR)"),
                 ("100test", "🧪 Diagnostika"),
                 ("tozalash", "🧹 Hammasini tozalash (noldan)"),
+                ("broker", "🏦 Broker (MT5 demo/real) ulash"),
             ]
             # v72: Chap pastdagi KO'K «Menu» tugmasi QAYTARILDI (foydalanuvchi so'radi).
             # Faqat pastdagi (reply) klaviaturaning ichidagi «☰ Menyu» tugmasi olib

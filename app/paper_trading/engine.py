@@ -130,7 +130,33 @@ class PaperEngine:
         if opened:
             await session.commit()
             logger.info("[PAPER] signal #%s uchun %d ta lot ochildi", signal.id, opened)
+            # v74: broker ulangan bo'lsa — ochish buyruqlari navbatga
+            try:
+                await self._broker_open(session, signal, user_ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[BRK] ochishni yuborish: %s", exc)
         return opened
+
+    async def _broker_open(self, session: AsyncSession, signal, user_ids) -> None:
+        """Broker egasi bo'lgan foydalanuvchi uchun ochish buyruqlarini qo'yadi."""
+        from app.services import broker as brk
+        cfg = await brk.load_cfg(session)
+        if not brk.is_ready(cfg):
+            return
+        owner = brk.owner_id(cfg)
+        if not owner or owner not in [int(u) for u in (user_ids or [])]:
+            return
+        lots = await self.open_positions(session, user_id=owner, signal_id=signal.id)
+        if not lots:
+            return
+        for pos in lots:
+            tag = "Lot1" if int(getattr(pos, "stage", 0) or 0) < 10 else "Lot2"
+            await brk.enqueue(
+                session, "OPEN", symbol=pos.symbol, side=pos.direction,
+                lot=round(float(pos.qty_total or 0) / 100.0, 2),
+                sl=float(pos.sl or 0.0), tp=float(pos.tp3 or 0.0),
+                signal_id=int(signal.id), comment=("SINO " + tag),
+            )
 
     # ---------- Yopilish (bir user pozitsiyasi) ----------
     async def _open_lots_left(self, session: AsyncSession, pos: PaperPosition) -> int:
@@ -186,6 +212,110 @@ class PaperEngine:
                                                         if str(getattr(x, "status", "")) == PaperStatus.OPEN.value]),
             "pnl": round(pnl, 4), "groups": len(groups),
         }
+
+    # ================= v74: QO'LDA YOPISH (inson omili) =================
+    async def manual_close(self, session: AsyncSession, *, user_id: int,
+                           signal_id: int | None = None, price: float | None = None,
+                           reason: str = "QO'LDA") -> dict:
+        """Foydalanuvchi o'zi yopadi (masalan hammasi foydada — foydani oladi).
+
+        Har bir ochiq lot JORIY narxda yopiladi; shu signalda ochiq lot qolmasa
+        signal ham yakunlanadi. Pul/balans apply_fill orqali hisoblanadi.
+        Qaytaradi: {closed, money, price, symbols, r_avg, broker}
+        """
+        from app.services import live_state
+
+        opens = await self.open_positions(session, user_id=user_id)
+        if signal_id is not None:
+            opens = [p for p in opens if int(p.signal_id or 0) == int(signal_id)]
+        if not opens:
+            return {"closed": 0, "money": 0.0, "price": price, "items": []}
+        prices: dict = {}
+        items: list[dict] = []
+        money_total = 0.0
+        for pos in opens:
+            px = price
+            if not px:
+                try:
+                    px = await live_state.get_price(pos.symbol)
+                except Exception:  # noqa: BLE001
+                    px = None
+            if not px:
+                px = float(pos.entry or 0.0)   # narx yo'q — kirish narxida (0 R)
+            px = float(px)
+            before = float(pos.realized_pnl or 0.0)
+            try:
+                await self.apply_fill(session, pos, px, portion=0.0, is_final=True,
+                                      exit_price_for_remaining=px, reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[PAPER] qo'lda yopish xatosi #%s: %s", pos.id, exc)
+                continue
+            money = float(pos.realized_pnl or 0.0) - before
+            money_total += money
+            prices[pos.symbol] = px
+            items.append({"pos_id": int(pos.id), "symbol": pos.symbol,
+                          "direction": pos.direction, "lot": float(pos.qty_total or 0) / 100.0,
+                          "money": round(money, 2), "price": px,
+                          "r": float(pos.r_multiple or 0.0)})
+            # v74: brokerda ham yopilsin (agar broker ulangan bo'lsa)
+            try:
+                await self._broker_close(session, user_id, pos, px)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[BRK] yopishni yuborish: %s", exc)
+        # signal yakuni
+        sig_ids = {int(p.signal_id) for p in opens if p.signal_id}
+        for sid in sig_ids:
+            try:
+                await self.finish_signal_if_done(session, sid, reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[PAPER] signal yakuni: %s", exc)
+        r_avg = 0.0
+        if items:
+            r_avg = sum(float(i.get("r") or 0.0) for i in items) / len(items)
+        logger.info("[PAPER] user %s qo'lda yopdi: %d lot, %+.2f$",
+                    user_id, len(items), money_total)
+        return {"closed": len(items), "money": round(money_total, 2),
+                "price": prices.get(opens[0].symbol) if opens else price,
+                "prices": prices, "items": items, "r_avg": round(r_avg, 3)}
+
+    async def finish_signal_if_done(self, session: AsyncSession, signal_id: int,
+                                    reason: str = "QO'LDA") -> bool:
+        """Signalda ochiq lot qolmagan bo'lsa — natijani yozib yakunlaydi."""
+        from app.core.enums import SignalStatus
+        from app.database.models.signal import Signal
+        from app.services.tracker import classify_result
+
+        left = await self.open_positions(session, signal_id=signal_id)
+        if left:
+            return False
+        sig = await session.scalar(select(Signal).where(Signal.id == int(signal_id)))
+        if sig is None:
+            return False
+        info = await self.signal_pnl(session, signal_id)
+        r = float(info.get("r_avg") or 0.0)
+        sig.is_active = False
+        sig.result = classify_result(r)
+        sig.r_multiple = round(r, 3)
+        sig.status = (SignalStatus.TP3_HIT.value if r > 0.05
+                      else SignalStatus.SL_HIT.value if r < -0.05
+                      else SignalStatus.EXPIRED.value)
+        sig.close_reason = str(reason)[:24]
+        sig.close_price = float(info.get("avg_exit") or sig.close_price or 0.0) or None
+        sig.closed_at = datetime.now(timezone.utc)
+        await session.commit()
+        return True
+
+    async def _broker_close(self, session: AsyncSession, user_id: int,
+                            pos: PaperPosition, price: float) -> None:
+        """Broker ulangan bo'lsa — yopish buyrug'ini navbatga qo'yadi."""
+        from app.services import broker as brk
+        cfg = await brk.load_cfg(session)
+        if not brk.is_ready(cfg) or brk.owner_id(cfg) != int(user_id or 0):
+            return
+        await brk.enqueue(session, "CLOSE", symbol=pos.symbol, side=pos.direction,
+                          lot=round(float(pos.qty_total or 0) / 100.0, 2),
+                          signal_id=int(pos.signal_id or 0), price=float(price or 0.0),
+                          comment="SINO qolda yopish")
 
     async def apply_fill(self, session: AsyncSession, pos: PaperPosition,
                          fill_price: float, portion: float, is_final: bool,

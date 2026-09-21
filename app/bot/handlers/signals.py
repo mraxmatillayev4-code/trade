@@ -138,46 +138,49 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
 
 
 @router.message(Command("kuzat"))
-async def cmd_live_track(message: Message) -> None:
-    """🔎 Bot bozorni hozir qanday kuzatayotgani: narx, R darajalar, oxirgi tekshiruv."""
+@router.message(F.text == "\U0001F50E Jonli kuzatuv")
+async def live_track_button(message: Message) -> None:
+    """v74: «🔎 Jonli kuzatuv» — asosiy menyudagi tugma (kanallar ichida emas)."""
+    await cmd_live_track(message)
+
+
+async def _track_view(uid: int) -> tuple[str, list[tuple[str, str]]]:
+    """Jonli kuzatuv matni + qo'lda yopish tugmalari (v74)."""
     from app.core.timeuz import format_tashkent
+    from app.database import crud as _crud
     from app.database.session import async_session_factory
     from app.paper_trading.engine import PaperEngine
     from app.services import live_state
 
-    uid = message.from_user.id if message.from_user else None
     engine = PaperEngine()
     async with async_session_factory() as session:
         opens = await engine.open_positions(session, user_id=uid)
-        sig_ids = [p.signal_id for p in opens if p.signal_id]
         sigs = {}
-        for sid in sig_ids:
-            sig = await crud.get_signal_by_id(session, sid)
+        for sid in {int(p.signal_id) for p in opens if p.signal_id}:
+            sig = await _crud.get_signal_by_id(session, sid)
             if sig is not None:
                 sigs[sid] = sig
 
     if not opens:
         chk_any = live_state.last_check_any()
+        alive = ""
         if chk_any is not None:
             age = max(0, int((datetime.now(timezone.utc) - chk_any).total_seconds()))
-            alive = f"⏱ Oxirgi sham tekshiruvi: {format_tashkent(chk_any)} · {age} s oldin"
-        else:
-            alive = "⏱ Hali sham qayta ishlanmadi (bot endigina ishga tushgan bo'lishi mumkin)"
-        await message.answer(
-            "🔎 <b>JONLI KUZATUV</b>\n━━━━━━━━━━━━━━━━\n"
-            "Hozir ochiq bitim yo'q — kuzatiladigan daraja ham yo'q.\n"
-            "Yangi signal kelganda shu yerga darajalar bilan chiqadi.\n\n"
-            f"{alive}\n"
-            "<i>Bot bozorni to'xtovsiz kuzatadi: har 1m sham yopilganda (WS jonli) + 15 s poll zaxira.</i>",
-            parse_mode="HTML",
-        )
-        return
+            alive = f"\n\u23F1 Oxirgi sham tekshiruvi: {format_tashkent(chk_any)} \u00B7 {age} s oldin"
+        return ("\U0001F50E <b>JONLI KUZATUV</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "Hozir ochiq bitim yo'q \u2014 yopadigan lot ham yo'q.\n"
+                "Yangi signal kelganda shu yerga darajalar bilan chiqadi va shu yerda "
+                "\u00AB\u2705 Yopish\u00BB tugmasi paydo bo'ladi.\n"
+                "Kuzatuv har 1m sham yopilganda avtomatik tekshiriladi, "
+                "xohlasangiz \u00AB\U0001F504 Yangilash\u00BB bilan qo'lda ham.\n" + alive, [])
 
     by_sig: dict = {}
     for p in opens:
         by_sig.setdefault(p.signal_id, []).append(p)
 
-    lines = ["🔎 <b>JONLI KUZATUV</b>", "━━━━━━━━━━━━━━━━"]
+    lines = ["\U0001F50E <b>JONLI KUZATUV</b>", "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"]
+    buttons: list[tuple[str, str]] = []
+    money_all = 0.0
     for sid, positions in by_sig.items():
         sig = sigs.get(sid)
         if sig is None:
@@ -187,14 +190,99 @@ async def cmd_live_track(message: Message) -> None:
         chk = live_state.last_check(sig.symbol, sig.timeframe)
         if chk is not None:
             age = max(0, int((datetime.now(timezone.utc) - chk).total_seconds()))
-            lines.append(f"   ⏱ Oxirgi tekshiruv: {format_tashkent(chk)} · {age} s oldin")
-        if live_state.last_error():
-            lines.append(f"   ⚠️ Narx xatosi: {live_state.last_error()[:80]}")
-        lines.append("━━━━━━━━━━━━━━━━")
+            lines.append(f"   \u23F1 Oxirgi tekshiruv: {format_tashkent(chk)} \u00B7 {age} s oldin")
+        lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+        no = getattr(sig, "signal_no", None) or sid
+        side = str(sig.direction or "").upper()
+        if price:
+            try:
+                from app.engine.risk import money_for_move
+                qty = sum(float(getattr(q, "qty_total", 0) or 0) for q in positions)
+                money_all += money_for_move(side, float(sig.entry or 0), float(price), qty)
+            except Exception:  # noqa: BLE001
+                pass
+        buttons.append((f"\u2705 Yopish \u2014 foyda ol (\u2116{no} {side})", "kclose:%d" % int(sid)))
+    if len(by_sig) > 1:
+        buttons.append(("\U0001F6D1 Hammasini yopish (qo'lda)", "kclose:all"))
+    buttons.append(("\U0001F504 Yangilash", "kreload"))
+    lines.append(
+        "<i>Qo'lda yopish: narx hozirgi holatda yopiladi va pul darhol hisobga "
+        "o'tadi (inson omili). Avto-trade esa o'z qoidalarida davom etadi \u2014 "
+        "kuzatuv har 1m sham yopilganda avtomatik yangilanadi.</i>"
+    )
+    return ("\n".join(lines), buttons)
 
-    lines.append("<i>Kuzatuv: har 1m sham yopilganda (WS jonli) + 15 s poll zaxira. "
-                 "TP/SL urilganda natija kartasi darhol keladi.</i>")
-    await message.answer("\n".join(lines), parse_mode="HTML")
+
+async def cmd_live_track(message: Message) -> None:
+    """🔎 Bot bozorni hozir qanday kuzatayotgani + QO'LDA YOPISH tugmalari (v74)."""
+    uid = message.from_user.id if message.from_user else None
+    text, buttons = await _track_view(uid)
+    await message.answer(text, parse_mode="HTML",
+                         reply_markup=kb.track_kb(buttons))
+
+
+@router.callback_query(F.data == "kreload")
+async def cb_track_reload(cb: CallbackQuery) -> None:
+    """«🔄 Yangilash» — jonli kuzatuvni qayta hisoblaydi."""
+    uid = cb.from_user.id if cb.from_user else None
+    text, buttons = await _track_view(uid)
+    try:
+        await cb.message.edit_text(text, parse_mode="HTML",
+                                   reply_markup=kb.track_kb(buttons))
+    except Exception:  # noqa: BLE001
+        try:
+            await cb.message.answer(text, parse_mode="HTML",
+                                    reply_markup=kb.track_kb(buttons))
+        except Exception:  # noqa: BLE001
+            pass
+    await cb.answer("Yangilandi")
+
+
+@router.callback_query(F.data.startswith("kclose:"))
+async def cb_manual_close(cb: CallbackQuery) -> None:
+    """«✅ Yopish — foyda ol» — lotlar JORIY narxda qo'lda yopiladi (inson omili)."""
+    uid = cb.from_user.id if cb.from_user else 0
+    raw = (cb.data or "").split(":", 1)[1]
+    sid = None if raw == "all" else (int(raw) if raw.isdigit() else None)
+    from app.core.timeuz import format_tashkent
+    from app.database.session import async_session_factory
+    from app.paper_trading.engine import PaperEngine
+
+    engine = PaperEngine()
+    async with async_session_factory() as session:
+        res = await engine.manual_close(session, user_id=uid, signal_id=sid,
+                                        reason="QO'LDA (foyda)")
+    if not res.get("closed"):
+        await cb.answer("Yopadigan ochiq lot yo'q.", show_alert=True)
+        return
+    money = float(res.get("money") or 0)
+    icon = "\U0001F7E2" if money >= 0 else "\U0001F534"
+    prices = res.get("prices") or {}
+    px_txt = " \u00B7 ".join(f"{fmt_price(v)}" for v in prices.values()) or "\u2014"
+    head = (f"\u2705 <b>QO'LDA YOPILDI</b> ({res['closed']} lot)\n"
+            f"{icon} Natija: <b>{money:+,.2f}$</b> \u00B7 narx: {px_txt} \u00B7 "
+            f"\u00F8 {float(res.get('r_avg') or 0):+.2f}R\n"
+            f"\u23F1 {format_tashkent()}")
+    if sid is None:
+        head += "\n<i>Barcha ochiq bitimlar yopildi — foyda hisobga o'tdi.</i>"
+    else:
+        head += "\n<i>Shu signalning lotlari yopildi; boshqa signallar ochiq qoldi.</i>"
+    try:
+        await cb.message.answer(head, parse_mode="HTML")
+    except Exception:  # noqa: BLE001
+        pass
+    await cb.answer(("Yopildi: %+.2f$" % money))
+    # kuzatuvni yangilab qo'yamiz
+    text, buttons = await _track_view(uid)
+    try:
+        await cb.message.edit_text(text, parse_mode="HTML",
+                                   reply_markup=kb.track_kb(buttons))
+    except Exception:  # noqa: BLE001
+        try:
+            await cb.message.answer(text, parse_mode="HTML",
+                                    reply_markup=kb.track_kb(buttons))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @router.callback_query(F.data.startswith("sig:filter:"))

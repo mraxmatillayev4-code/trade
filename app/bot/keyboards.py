@@ -27,7 +27,10 @@ def main_menu_reply(user_id: int | None = None) -> ReplyKeyboardMarkup:
         KeyboardButton(text="🗓 Hisobotlar"),
     )
     kb.row(
+        KeyboardButton(text="🔎 Jonli kuzatuv"),
         KeyboardButton(text="💼 Hisob (paper)"),
+    )
+    kb.row(
         KeyboardButton(text="🤖 Avto-trade: yoqish/o'chirish"),
     )
     kb.row(
@@ -133,6 +136,21 @@ def mode_reply() -> ReplyKeyboardMarkup:
 def hide_reply_kb() -> ReplyKeyboardRemove:
     """Pastki klaviaturani butunlay yig'adi (Telegram'ga 'olib tashla' deydi)."""
     return ReplyKeyboardRemove()
+
+
+def track_kb(rows: list[tuple[str, str]], extra: list[tuple[str, str]] | None = None
+             ) -> InlineKeyboardMarkup:
+    """v74: jonli kuzatuv tugmalari — lotni qo'lda yopish (inson omili).
+
+    rows: [(matn, callback_data), ...] — har bir signal uchun «✅ Yopish» tugmasi.
+    """
+    kb = InlineKeyboardBuilder()
+    for label, data in rows:
+        kb.button(text=label, callback_data=data)
+    for label, data in (extra or []):
+        kb.button(text=label, callback_data=data)
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def reopen_menu_kb() -> InlineKeyboardMarkup:
