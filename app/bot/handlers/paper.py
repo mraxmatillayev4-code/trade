@@ -165,10 +165,11 @@ def _account_lines(acc, open_pos, closed, stats: dict | None = None) -> list[str
     wr = (wins / trades * 100.0) if trades else 0.0
     try:
         from app.core.config import get_settings
-        risk_pct = float(get_settings().risk_percent or 1.0)
+        _st = get_settings()
+        lot_size = float(getattr(_st, "lot_size", 1.0) or 1.0)
+        contract = float(getattr(_st, "contract_size", 100.0) or 100.0)
     except Exception:  # noqa: BLE001
-        risk_pct = 1.0
-    risk_usd = float(acc.balance or 0) * risk_pct / 100.0
+        lot_size, contract = 1.0, 100.0
     lines = [
         "💼 <b>SIZNING VIRTUAL HISOBINGIZ</b>",
         "━━━━━━━━━━━━━━━━",
@@ -177,8 +178,8 @@ def _account_lines(acc, open_pos, closed, stats: dict | None = None) -> list[str
         f"{icon} Jami natija: <b>{pnl:+,.2f}$ ({pnl_pct:+.2f}%)</b>",
         f"📊 Bitimlar: <b>{trades}</b> (🏆{wins} / 💥{losses}"
         + (f" / ⚖️{be}" if be else "") + f") | G'alaba: <b>{wr:.0f}%</b>",
-        f"\u2696\uFE0F 1 signalga risk: <b>{risk_usd:,.2f}$</b> "
-        f"({risk_pct:g}% balans \u00B7 2 lotga bo'linadi)",
+        f"\u2696\uFE0F Hajm: <b>{lot_size / 2:,.2f} + {lot_size / 2:,.2f} lot</b> "
+        f"(jami {lot_size:,.2f} lot \u00B7 1 lot = {contract:,.0f} oz)",
         f"🔴 Ketma-ket zarar: {acc.consecutive_losses}",
         f"🤖 Avto-trade: <b>{auto}</b>",
         f"📂 Ochiq: <b>{open_signals}</b> bitim ({len(open_pos)} lot)",

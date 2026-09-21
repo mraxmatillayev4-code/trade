@@ -16,7 +16,7 @@ from app.core.enums import Direction, PaperStatus
 from app.core.logging import get_logger
 from app.database.models.paper import PaperAccount, PaperPosition
 from app.database.models.signal import Signal
-from app.engine.risk import position_size
+from app.engine.risk import lot_position_size, money_for_move
 
 logger = get_logger(__name__)
 
@@ -93,9 +93,11 @@ class PaperEngine:
                 if risk_distance <= 0:
                     logger.warning("[PAPER] risk 0 — #%s", signal.id)
                     continue
-                qty, risk_amount = position_size(
-                    acc.balance, self._settings.risk_percent, risk_distance, signal.entry
-                )
+                # v68: HAJM fikslangan (terminaldagi kabi): 1 lot = 100 oz.
+                # Pul = narx farqi x hajm; SL urilsa shu pul yo'qoladi.
+                _lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
+                _ctr = float(getattr(self._settings, "contract_size", 100.0) or 100.0)
+                qty, risk_amount = lot_position_size(risk_distance, _lot, _ctr)
                 if qty <= 0:
                     continue
                 half_q = qty / 2.0
@@ -119,7 +121,10 @@ class PaperEngine:
                     **common, tp2=tp4, tp3=tp5, stage=10,
                 ))
                 opened += 2
-                logger.info("[PAPER] user %s 2 lot #%s qty=%.4f+%.4f", uid, signal.id, half_q, half_q)
+                logger.info(
+                    "[PAPER] user %s 2 lot #%s hajm=%.2f+%.2f lot "
+                    "(1 lot = %.0f oz; SL gacha %.2f$)",
+                    uid, signal.id, half_q / _ctr, half_q / _ctr, _ctr, risk_amount)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[PAPER] user %s uchun bitim ochilmadi: %s", uid, exc)
         if opened:

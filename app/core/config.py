@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     tp2_r: float = 2.0
     tp3_r: float = 3.0
     risk_percent: float = 1.0
+    # === v68: HAJM (lot) va pul hisobi — terminaldagi kabi ===
+    lot_size: float = 1.0                 # signal uchun jami hajm (lot); 2 lotga bo'linadi
+    contract_size: float = 100.0          # 1 lot XAU = 100 oz (pul = narx farqi x 100 x lot)
     paper_initial_balance: float = 10_000.0
 
     # --- Signal qoidalari ---

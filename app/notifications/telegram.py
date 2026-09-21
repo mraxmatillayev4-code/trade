@@ -138,27 +138,41 @@ _LOT_REASON = {
 }
 
 
-def lot_money_line(balance: float, risk_percent: float = 1.0) -> str:
-    """v62: «💵 Har lot: 50.00$ (2 lot · jami 100.00$ · hisob 10 000.00$)»."""
-    half = float(balance or 0) * float(risk_percent or 1.0) / 200.0
-    return (f"\U0001F4B5 <b>Har lot: {half:,.2f}$</b> "
-            f"(2 lot \u00B7 jami {half * 2:,.2f}$ \u00B7 hisob {float(balance or 0):,.2f}$)")
+def lot_money_line(balance: float = 0.0, risk_percent: float = 1.0, *,
+                   lot: float = 1.0, risk_distance: float = 0.0) -> str:
+    """v68: hajm va shu hajmdagi pul — terminaldagi formulada (1 lot = 100 oz).
+
+    «💵 Hajm: 0.50 + 0.50 lot (jami 1.00 lot · 1 lot = 100 oz) · SL gacha ~331.00$»
+    """
+    total = float(lot or 1.0)
+    half = total / 2.0
+    d = abs(float(risk_distance or 0.0))
+    risk_total = d * 100.0 * total
+    txt = (f"\U0001F4B5 <b>Hajm: {half:,.2f} + {half:,.2f} lot</b> "
+           f"(jami {total:,.2f} lot \u00B7 1 lot = 100 oz)")
+    if risk_total > 0:
+        txt += f" \u00B7 SL gacha ~{risk_total:,.2f}$"
+    if balance:
+        txt += f" \u00B7 hisob {float(balance):,.2f}$"
+    return txt
 
 
 def lot_money_text(pos) -> str:
-    """v62: lot NEChA DOLLARDAN ochilgani — «50.00$ · 0.151 lot»."""
-    risk = float(getattr(pos, "risk_amount", 0) or 0)
+    """v68: HAJM va shu hajmdagi pul — «0.50 lot · SL gacha 165.50$».
+
+    Terminaldagi kabi: 1 lot = 100 oz, pul = narx farqi x hajm.
+    (v62 talabi ham saqlanadi: lot necha dollarlik ekani ko'rinadi.)
+    """
     qty = float(getattr(pos, "qty_total", 0) or 0)
     sym = str(getattr(pos, "symbol", "") or "").upper()
-    parts: list[str] = []
+    risk = abs(float(getattr(pos, "risk_amount", 0) or 0))
+    if qty <= 0:
+        return "hajm —"
+    lot = (qty / 100.0) if sym.startswith(("XAU", "GOLD")) else qty
+    txt = f"{lot:,.2f} lot"
     if risk > 0:
-        parts.append(f"{risk:,.2f}$")
-    if qty > 0:
-        if sym.startswith(("XAU", "GOLD")):
-            parts.append(f"{qty / 100.0:,.3f} lot")
-        else:
-            parts.append(f"hajm {qty:,.4f}")
-    return " · ".join(parts)
+        txt += f" · SL gacha {risk:,.2f}$"
+    return txt
 
 
 def lot_reason_text(reason: str | None, r: float | None = None) -> str:
@@ -577,8 +591,9 @@ class TelegramNotifier:
                 acc = await PaperEngine().get_account(s2, targets[0])
                 bal = float(getattr(acc, "balance", 0) or 0)
                 risk_pct = float(getattr(self._settings, "risk_percent", 1.0) or 1.0)
-            if bal > 0:
-                text += "\n" + lot_money_line(bal, risk_pct)
+            _lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
+            _dist = abs(float(signal.entry or 0) - float(signal.sl or 0))
+            text += "\n" + lot_money_line(bal, risk_pct, lot=_lot, risk_distance=_dist)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[NOTIFY] lot puli hisoblanmadi: %s", exc)
 

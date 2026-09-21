@@ -60,12 +60,58 @@ def calculate_levels(direction: Direction, entry: float, atr_value: float,
 
 def position_size(balance: float, risk_percent: float, risk_distance: float,
                   entry: float) -> tuple[float, float]:
-    """Virtual pozitsiya hajmi: risk_amount / stop_distance."""
+    """Virtual pozitsiya hajmi: risk_amount / stop_distance.
+
+    v68: ishlatilmaydi (hajm FAYS bo'yicha olinadi) — moslik uchun qoldirildi.
+    """
     risk_amount = balance * risk_percent / 100.0
     if risk_distance <= 0:
         return 0.0, risk_amount
     qty = risk_amount / risk_distance
     return qty, risk_amount
+
+
+# ==================== v68: HAJM (lot) va PUL hisobi ====================
+CONTRACT_OZ = 100.0          # 1 lot XAUUSD = 100 untsiya
+LOT_MIN = 0.01               # minimal hajm
+
+
+def lot_qty(lot: float, contract: float = CONTRACT_OZ) -> float:
+    """v68: hajm (lot) -> untsiya. 1.00 lot = 100 oz."""
+    try:
+        return max(0.0, float(lot or 0.0) * float(contract or CONTRACT_OZ))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def money_for_move(direction, entry: float, price: float, qty: float) -> float:
+    """v68: terminaldagi pul hisobi — (narx farqi) x hajm(oz).
+
+    XAUUSD: 1.00 lot = 100 oz -> narx 1$ yursa 100$ bo'ladi.
+    Terminaldagi misol: 4348.683 dan 4351.080 gacha 1.00 lot SELL = -239.70$.
+    """
+    try:
+        e = float(entry or 0.0)
+        p = float(price or 0.0)
+        q = float(qty or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    d = str(getattr(direction, "value", direction) or "BUY").upper()
+    return (p - e) * q if d == "BUY" else (e - p) * q
+
+
+def lot_position_size(risk_distance: float, lot: float = 1.0,
+                      contract: float = CONTRACT_OZ) -> tuple[float, float]:
+    """v68: hajm bo'yicha pozitsiya — (qty_oz, shu hajmdagi pul riski).
+
+    risk_amount = hajm(oz) x stop masofasi — ya'ni SL urilsa yo'qoladigan pul.
+    """
+    qty = lot_qty(lot, contract)
+    try:
+        d = max(0.0, float(risk_distance or 0.0))
+    except (TypeError, ValueError):
+        d = 0.0
+    return qty, qty * d
 
 
 def r_multiple_for_price(direction: Direction, entry: float, sl: float,

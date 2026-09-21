@@ -67,7 +67,7 @@ async def show_signals_message(message: Message) -> None:
 #  v61: JONLI KUZATUV — bot bozorni hozir qanday kuzatayotganini ko'rsatadi
 # =========================================================================== #
 async def _live_block(sig, positions: list, price: float | None) -> list[str]:
-    from app.engine.risk import r_multiple_for_price, r_price
+    from app.engine.risk import money_for_move, r_multiple_for_price, r_price
     from app.core.enums import Direction
     head = positions[0]
     d = str(head.direction or "BUY").upper()
@@ -89,6 +89,15 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         Direction.BUY if d == "BUY" else Direction.SELL, entry, sl, price
     )
     out.append(f"   💹 Joriy narx: <b>{fmt_price(price)}</b> · hozirgi R: <b>{r_now:+.2f}R</b>")
+    # v68: pul — terminaldagi kabi (hajm x narx farqi). 1 lot = 100 oz.
+    try:
+        _qty = sum(float(getattr(q, "qty_total", 0) or 0) for q in positions)
+        _money = money_for_move(d, entry, price, _qty)
+        _lots = _qty / 100.0
+        out.append(f"   💵 <b>Hozirgi P/L: {_money:+,.2f}$</b> · hajm {_lots:,.2f} lot "
+                   f"(1 lot = 100 oz)")
+    except Exception:  # noqa: BLE001
+        pass
     # Darajalar: +1R/+2R/+3R — signalning o'z narxlari, +4R/+5R — R dan hisoblanadi
     levels: dict = {}
     for n in (1, 2, 3):
