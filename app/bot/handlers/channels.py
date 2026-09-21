@@ -251,7 +251,8 @@ async def _menu_text(session, is_admin: bool) -> str:
     ]
     if is_admin:
         lines.append("Admin: ➕ Qo'shish / ➖ O'chirish / 👤 Akkaunt.")
-        lines.append("🗑 Kanalni o'chirish: kanal nomi yozilgan tugmani bosing — BITTA bosishda o'chadi.")
+        lines.append("🗑 Kanalni o'chirish: <b>➖ O'chirish</b> tugmasini bosing — kanal nomlari "
+                     "tugma bo'lib chiqadi va bir bosishda o'chadi.")
         lines.append("↩️ Adashsangiz: o'chirilgandan keyin chiqadigan «Qaytarish» tugmasini bosing.")
         lines.append("\U0001F9F9 Hamma signalni unutish (\u21161 dan boshlash): /tozalash")
     return "\n".join(lines)
@@ -319,10 +320,8 @@ async def channels_menu(message: Message, state) -> None:
         text = await _menu_text(session, True)
         chans = await list_channels(session)
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
-    # v66: har bir kanal uchun bitta inline o'chirish tugmasi
-    ikb = _channels_inline(chans)
-    if ikb is not None:
-        await message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
+    # v73: bu bo'limda o'chirish tugmalari chiqmaydi — faqat ma'lumot.
+    # Kanal nomlari tugma bo'lib faqat «➖ O'chirish» bosilganda chiqadi.
 
 
 # ===================== /100 — kanallardan xabar yozib olish =====================
@@ -642,6 +641,8 @@ async def ask_remove(message: Message, state) -> None:
     ikb = _channels_inline(chans)
     if ikb is not None:
         await message.answer(_DEL_HINT, parse_mode="HTML", reply_markup=ikb)
+    else:
+        await message.answer("ℹ️ Hozir ulangan kanal yo'q — o'chiradigan narsa ham yo'q.")
 
 
 @router.message(ChannelState.awaiting_remove, F.text == "⬅️ Orqaga")
