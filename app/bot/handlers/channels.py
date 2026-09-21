@@ -86,6 +86,11 @@ async def _reload_watcher() -> None:
 
 _login_tmp: dict = {}
 
+# Kanallarni qo'shish/o'chirish jarayonidagi foydalanuvchilar. Bu paytda kelgan
+# forward yoki matn SIGNAL deb TAHLIL QILINMAYDI — faqat kanal manbasi sifatida
+# o'qiladi («shunchaki kanalni ulasin»).
+_ch_flow: set[int] = set()
+
 
 def _is_forward(message: Message) -> bool:
     if getattr(message, "forward_from_chat", None) is not None:
@@ -109,6 +114,9 @@ class AdminSignalIn(Filter):
             return False
         step = (_login_tmp.get(user.id) or {}).get("step")
         if step:
+            return False
+        if user.id in _ch_flow:
+            # ➕ Qo'shish / ➖ O'chirish jarayoni: bu xabar faqat kanal uchun
             return False
         if _is_forward(message):
             return True
@@ -135,6 +143,10 @@ class AdminSignalIn(Filter):
 
 @router.message(AdminSignalIn())
 async def on_admin_signal(message: Message) -> None:
+    uid = message.from_user.id if message.from_user else None
+    if uid is not None and uid in _ch_flow:
+        return       # kanal ulash jarayoni — signal tahlili qilinmaydi
+
     """Kanal xabari botga keldi — AI SIGNAL/EMAS."""
     try:
         from app.services.channel_inbox import ingest_from_bot_message
@@ -248,6 +260,8 @@ async def channels_menu(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
         await message.answer("📡 Kanallar — faqat admin.")
         return
+    if message.from_user:
+        _ch_flow.discard(message.from_user.id)
     await state.set_state(ChannelState.menu)
     async with async_session_factory() as session:
         text = await _menu_text(session, _is_admin(message.from_user.id if message.from_user else None))
@@ -440,6 +454,7 @@ async def cmd_dump100file(message: Message) -> None:
 async def channels_back(message: Message, state) -> None:
     if message.from_user:
         _login_tmp.pop(message.from_user.id, None)
+        _ch_flow.discard(message.from_user.id)
     await state.clear()
     await message.answer(
         "🏠 <b>Asosiy menyuga qaytdingiz.</b>\nPastdan bo'limni tanlang 👇",
@@ -487,6 +502,7 @@ async def ask_add(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Faqat admin kanal qo'sha oladi.")
         return
+    _ch_flow.add(message.from_user.id)
     await state.set_state(ChannelState.awaiting_add)
     await message.answer(
         "➕ Kanal qo'shish:\n"
@@ -501,6 +517,8 @@ async def ask_add(message: Message, state) -> None:
 
 @router.message(ChannelState.awaiting_add, F.text == "⬅️ Orqaga")
 async def add_cancel(message: Message, state) -> None:
+    if message.from_user:
+        _ch_flow.discard(message.from_user.id)
     await state.set_state(ChannelState.menu)
     async with async_session_factory() as session:
         text = await _menu_text(session, True)
@@ -534,11 +552,16 @@ async def do_add(message: Message, state) -> None:
             )
             return
         kind = "public"
+    if message.from_user:
+        _ch_flow.discard(message.from_user.id)
     async with async_session_factory() as session:
         ok, msg, _ch = await add_channel(
             session, username=username, chat_id=chat_id, title=title, kind=kind,
         )
-        text = ("✅ " if ok else "⚠️ ") + msg + "\n\n" + await _menu_text(session, True)
+        head = ("✅ Kanal ulandi — endi shu kanaldan signallar o'qiladi.\n"
+                if ok else "⚠️ ")
+        text = head + msg + "\nℹ️ Eski xabarlar o'qilmaydi — faqat YANGI postlar.\n\n" \
+            + await _menu_text(session, True)
     await state.set_state(ChannelState.menu)
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
     if ok:
@@ -552,6 +575,7 @@ async def ask_remove(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Faqat admin o'chira oladi.")
         return
+    _ch_flow.add(message.from_user.id)
     await state.set_state(ChannelState.awaiting_remove)
     await message.answer(
         "➖ Qaysi kanalni o'chiramiz? <code>@username</code> yuboring.\nBekor: ⬅️ Orqaga.",
@@ -561,6 +585,8 @@ async def ask_remove(message: Message, state) -> None:
 
 @router.message(ChannelState.awaiting_remove, F.text == "⬅️ Orqaga")
 async def remove_cancel(message: Message, state) -> None:
+    if message.from_user:
+        _ch_flow.discard(message.from_user.id)
     await state.set_state(ChannelState.menu)
     async with async_session_factory() as session:
         text = await _menu_text(session, True)
@@ -576,6 +602,8 @@ async def do_remove(message: Message, state) -> None:
     if not key:
         await message.answer("⚠️ @username yuboring.")
         return
+    if message.from_user:
+        _ch_flow.discard(message.from_user.id)
     async with async_session_factory() as session:
         ok, msg = await remove_channel(session, key)
         text = ("✅ " if ok else "⚠️ ") + msg + "\n\n" + await _menu_text(session, True)
