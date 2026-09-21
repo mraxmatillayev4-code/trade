@@ -2,7 +2,8 @@
 
 Botni kanalga qo'shish shart emas — user akkaunt (Telethon).
 Global NewMessage YO'Q (ulanmagan kanal oqmasin).
-Asosiy: har 8 soniyada poll. Qo'shimcha: listed entity event.
+TEZKOR rejim: yangi xabar kelishi bilan EVENT orqali DARHOL o'qiladi (0 kutish),
+zaxira yo'l — har 2 soniyada poll (sekin internet/blokda ham signal kechikmaydi).
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import asyncio
 import io
 from datetime import datetime, timezone
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.database.session import async_session_factory
 from app.services.channel_inbox import ingest_raw, ping_admin
@@ -23,6 +25,8 @@ from app.services.channel_store import (
 from app.services.channel_user import credentials, make_client
 
 logger = get_logger(__name__)
+
+_POLL_SECONDS = 2.0   # v57: tezkor poll (avval 8 s edi)
 
 _client = None
 _task: asyncio.Task | None = None
@@ -40,6 +44,7 @@ _status: dict = {
     "channels_ok": [],
     "channels_fail": [],
     "recent": [],
+    "poll_seconds": _POLL_SECONDS,
 }
 
 
@@ -236,6 +241,11 @@ async def _poll_once(client) -> None:
         _status["channels_fail"] = []
         _status["last_poll"] = datetime.now(timezone.utc).isoformat()
         return
+    catchup_n = 0
+    try:
+        catchup_n = int(getattr(get_settings(), "channel_catchup_count", 0) or 0)
+    except Exception:  # noqa: BLE001
+        catchup_n = 0
     for ch in channels:
         entity = await _resolve(client, ch)
         if entity is None:
@@ -255,16 +265,16 @@ async def _poll_once(client) -> None:
                     break
                 batch.append(msg)
             batch.reverse()
-            n_new = 0
-            for msg in batch:
-                await _process_msg(msg, ch)
-                n_new += 1
-            if n_new:
-                _note(f"yangi {n_new} ta {display_name(ch)}")
-            elif first and last <= 0:
+
+            if not last:
+                # v56: bu kanalda suv belgisi yo'q (yangi ulandi) — TARIX O'QILMAYDI.
+                # Aks holda bot 25 ta eski postni "signal" deb qayta ishlab yuborardi.
                 newest = 0
                 for m in batch:
                     newest = max(newest, int(getattr(m, "id", 0) or 0))
+                if catchup_n > 0 and batch:
+                    for msg in batch[-catchup_n:]:
+                        await _process_msg(msg, ch)
                 if newest:
                     async with async_session_factory() as session:
                         await touch_channel(
@@ -274,7 +284,18 @@ async def _poll_once(client) -> None:
                             last_msg_id=newest,
                         )
                     ch["last_msg_id"] = newest
-                    _note(f"watermark {display_name(ch)} #{newest}")
+                _note(f"suv belgisi {display_name(ch)} #{newest} "
+                      f"(tarix o'qilmadi: {len(batch)} ta eski xabar)")
+                if key:
+                    _catchup.add(key)
+                continue
+
+            n_new = 0
+            for msg in batch:
+                await _process_msg(msg, ch)
+                n_new += 1
+            if n_new:
+                _note(f"yangi {n_new} ta {display_name(ch)}")
             if key:
                 _catchup.add(key)
         except Exception as exc:  # noqa: BLE001
@@ -372,7 +393,8 @@ async def _run() -> None:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("[CH-WATCH] poll: %s", exc)
                         _status["last_error"] = str(exc)[:200]
-                    await asyncio.sleep(8)
+                    # v57: TEZKOR rejim — 2 s (bozor tez, kechikish xavf)
+                    await asyncio.sleep(_POLL_SECONDS)
 
             poll_task = asyncio.create_task(_poll_loop(), name="ch-poll")
             try:

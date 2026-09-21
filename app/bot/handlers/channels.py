@@ -62,6 +62,28 @@ def _is_admin(user_id: int | None) -> bool:
     return is_admin(user_id)
 
 
+_tasks: set = set()
+
+
+def _spawn(coro) -> None:
+    """Fon vazifasi (havola yo'qolmasligi uchun to'plamda saqlanadi)."""
+    try:
+        t = asyncio.create_task(coro)
+    except RuntimeError:
+        return
+    _tasks.add(t)
+    t.add_done_callback(_tasks.discard)
+
+
+async def _reload_watcher() -> None:
+    """Kanallar o'zgarganda kuzatuvchi qayta ulanadi — yangi xabar DARHOL o'qiladi."""
+    try:
+        from app.services.channel_watcher import restart_watcher
+        await restart_watcher()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[KANAL] kuzatuvchi: %s", exc)
+
+
 _login_tmp: dict = {}
 
 
@@ -217,6 +239,7 @@ async def _menu_text(session, is_admin: bool) -> str:
     ]
     if is_admin:
         lines.append("Admin: ➕ Qo'shish / ➖ O'chirish / 👤 Akkaunt.")
+        lines.append("\U0001F9F9 Hamma signalni unutish (\u21161 dan boshlash): /tozalash")
     return "\n".join(lines)
 
 
@@ -517,6 +540,9 @@ async def do_add(message: Message, state) -> None:
         text = ("✅ " if ok else "⚠️ ") + msg + "\n\n" + await _menu_text(session, True)
     await state.set_state(ChannelState.menu)
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+    if ok:
+        # yangi kanal DARHOL kuzatuvga qo'shiladi (event) — poll kutmasdan o'qiladi
+        _spawn(_reload_watcher())
 
 
 @router.message(ChannelState.menu, F.text == "➖ O'chirish")
@@ -553,6 +579,74 @@ async def do_remove(message: Message, state) -> None:
         text = ("✅ " if ok else "⚠️ ") + msg + "\n\n" + await _menu_text(session, True)
     await state.set_state(ChannelState.menu)
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+    if ok:
+        _spawn(_reload_watcher())
+
+
+@router.message(Command("tozalash"))
+@router.message(Command("forget"))
+async def cmd_wipe(message: Message) -> None:
+    """\U0001F9F9 Bot hamma signalni, statistikani va kanal ro'yxatini unutadi."""
+    if not _is_admin(message.from_user.id if message.from_user else None):
+        await message.answer("\U0001F9F9 Tozalash — faqat admin.")
+        return
+    await message.answer(
+        "\U0001F9F9 <b>TOZALASH — bot hamma narsani unutadi</b>\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u2022 barcha signallar (raqamlash \u21161 dan boshlanadi)\n"
+        "\u2022 paper (virtual) hisob va pozitsiyalar\n"
+        "\u2022 strategiya + kanal statistikasi\n"
+        "\u2022 kanallar ro'yxati (keyin o'zingiz qayta qo'shasiz)\n"
+        "\n"
+        "\u2705 Akkaunt ulanishi SAQLANADI — QR/kod kerak emas.\n"
+        "\u2139\uFE0F Kanal qo'shilganda eski xabarlar O'QILMAYDI — faqat YANGI postlar.\n"
+        "\n"
+        "Davom etamizmi?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="\u2705 Ha, tozala", callback_data="wipeok"),
+            InlineKeyboardButton(text="\u274C Bekor", callback_data="wipeno"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data == "wipeno")
+async def wipe_cancel(cb: CallbackQuery) -> None:
+    await cb.answer("Bekor qilindi.")
+    if cb.message is not None:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        await cb.message.answer(
+            "\u274C Tozalash bekor qilindi — hech narsa o'chirilmadi.",
+            reply_markup=kb.channels_reply(True),
+        )
+
+
+@router.callback_query(F.data == "wipeok")
+async def wipe_confirm(cb: CallbackQuery) -> None:
+    if not _is_admin(cb.from_user.id if cb.from_user else None):
+        await cb.answer("Faqat admin.", show_alert=True)
+        return
+    await cb.answer("Tozalanmoqda...")
+    if cb.message is None:
+        return
+    from app.services.wipe import report_text, wipe_all
+    try:
+        res = await wipe_all(drop_channels=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[TOZALASH] %s", exc)
+        await cb.message.answer(f"\u274C Tozalashda xato: {exc}")
+        return
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    _spawn(_reload_watcher())
+    await cb.message.answer(
+        report_text(res), parse_mode="HTML", reply_markup=kb.channels_reply(True),
+    )
 
 
 _LOGIN_SKIP = _MENU_BTNS
@@ -709,10 +803,18 @@ async def _login_done(message: Message) -> None:
     await message.answer(
         "✅ <b>Akkaunt ulandi.</b>\n"
         f"\U0001F464 {st.get('account') or '—'} · \U0001F4E1 kanallar: {st.get('channels', 0)}\n"
-        "Kanallar kuzatilmoqda, signallar keladi.",
+        "Kanallar kuzatilmoqda, signallar keladi.\n"
+        "\u2139\uFE0F Eski xabarlar o'qilmaydi — faqat <b>yangi</b> postlar signal bo'ladi.",
         parse_mode="HTML",
         reply_markup=kb.channels_reply(True),
     )
+    # Qaysi kanallar ulanganini TO'LIQ ko'rsatamiz (ro'yxat + statistika)
+    try:
+        async with async_session_factory() as session:
+            menu = await _menu_text(session, True)
+        await message.answer(menu, parse_mode="HTML", reply_markup=kb.channels_reply(True))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AKKAUNT] kanal ro'yxati: %s", exc)
 
 
 async def _qr_loop(message: Message, msg=None) -> None:
