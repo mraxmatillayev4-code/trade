@@ -105,16 +105,23 @@ async def cmd_start(message: Message, state) -> None:
     await message.answer(
         MENU_READY + extra +
         "\n🤖 Avto-trade <b>yoqilgan</b> — yangi signallar virtual hisobda ochiladi.\n"
-        "\n☰ <b>Menyu</b> tugmasi pastda doim turadi; uni bosib bo'limlarga qaytasiz.\n"
-        "<i>Barcha commandlar ro'yxati: pastdagi ☰ (yoki klaviaturada «/» belgisi).</i>",
+        "\n⌨️ Pastdagi klaviatura <b>yashirinadigan</b> — uni pastga surib yig'ib qo'ysangiz "
+        "bo'ladi, xohlaganda qayta ochasiz.\n"
+        "<i>Commandlar ro'yxati: input yonidagi ☰ (yoki «/» belgisi).</i>",
         parse_mode="HTML",
         reply_markup=kb.main_menu_reply(uid),
+    )
+    # v69: klaviaturani yashirish / qayta ochish tugmalari (xabar ostida)
+    await message.answer(
+        "⌨️ <b>Klaviatura boshqaruvi</b>",
+        parse_mode="HTML", reply_markup=kb.menu_controls_kb(),
     )
 
 
 @router.message(F.text == "☰ Menyu")
 async def menu_button(message: Message, state) -> None:
-    """«☰ Menyu» tugmasi — xuddi /menu kabi ishlaydi (istalgan holatda)."""
+    """v69: tugma klaviaturadan olib tashlandi, lekin eski klaviatura bilan
+    yozganlar uchun handler qoldirilgan — xuddi /menu kabi ishlaydi."""
     await cmd_menu(message, state)
 
 
@@ -129,13 +136,33 @@ async def cmd_menu(message: Message, state) -> None:
         parse_mode="HTML",
         reply_markup=kb.main_menu_reply(uid),
     )
+    await message.answer(
+        "⌨️ <b>Klaviatura boshqaruvi</b>",
+        parse_mode="HTML", reply_markup=kb.menu_controls_kb(),
+    )
+
+
+@router.callback_query(F.data == "menu:hide")
+async def hide_menu(callback: CallbackQuery) -> None:
+    """v69: pastdagi klaviaturani YASHIRADI (matn kiritish maydoni toza qoladi)."""
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb.reopen_menu_kb())
+    except Exception:  # noqa: BLE001
+        pass
+    await callback.message.answer(
+        "⌨️ Klaviatura yashirildi.\nQayta ochish: pastdagi <b>☰ Menyuni qayta ochish</b> "
+        "yoki /menu.",
+        parse_mode="HTML",
+        reply_markup=kb.hide_reply_kb(),
+    )
+    await callback.answer("Klaviatura yashirildi")
 
 
 @router.callback_query(F.data == "menu:reopen")
 async def reopen_menu(callback: CallbackQuery) -> None:
     """Yig'ilgan klaviaturani qayta ochadi."""
     try:
-        await callback.message.delete()
+        await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
     await callback.message.answer(

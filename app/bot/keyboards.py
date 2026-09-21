@@ -39,15 +39,14 @@ def main_menu_reply(user_id: int | None = None) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📡 Kanallar"),
             KeyboardButton(text="📚 Strategiyalar"),
         )
-    # v64: «☰ Menyu» doim ko'rinib turadi (klaviatura yig'ilib qolsa ham qaytarib oladi)
-    kb.row(
-        KeyboardButton(text="☰ Menyu"),
-        KeyboardButton(text="ℹ️ Ma'lumot"),
-    )
+    # v69: «☰ Menyu» tugmasi OLIB TASHLANDI. Klaviatura endi YASHIRINADIGAN:
+    # is_persistent=False — pastga surilsa yig'iladi, kerak bo'lganda xabar
+    # ostidagi «☰ Menyuni qayta ochish» tugmasi bilan qaytariladi.
+    kb.row(KeyboardButton(text="ℹ️ Ma'lumot"))
     return kb.as_markup(
         resize_keyboard=True,
         one_time_keyboard=False,
-        is_persistent=True,
+        is_persistent=False,
         input_field_placeholder="Kerakli bo'limni tanlang 👇",
     )
 
@@ -139,6 +138,14 @@ def hide_reply_kb() -> ReplyKeyboardRemove:
 def reopen_menu_kb() -> InlineKeyboardMarkup:
     """Klaviatura yig'ilgandan keyin xabar ostida 'Qayta ochish' tugmasi."""
     kb = InlineKeyboardBuilder()
+    kb.button(text="☰ Menyuni qayta ochish", callback_data="menu:reopen")
+    return kb.as_markup()
+
+
+def menu_controls_kb() -> InlineKeyboardMarkup:
+    """v69: pastdagi klaviaturani YASHIRISH yoki QAYTA OCHISH (xabar ostida)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⌨️ Klaviaturani yashirish", callback_data="menu:hide")
     kb.button(text="☰ Menyuni qayta ochish", callback_data="menu:reopen")
     return kb.as_markup()
 
