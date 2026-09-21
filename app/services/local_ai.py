@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-76"
+__version__ = "SINO-LAI-77"
 
 import difflib
 import re
@@ -785,6 +785,45 @@ def _screen_veto(ocr: str, cap: str = "") -> str:
     return ""
 
 
+# --- v77: GRAFIK / ILOVA SKRINSHOTI (narx o'qi, vaqt o'qi, menyu tugmalari) ---
+_CHART_PX = re.compile(r"\b\d{4}[.,]\d{1,3}\b")          # 4 358.890 - grafik o'qi
+_CHART_UI = re.compile(
+    r"(?:korrektirovka|korrekt|nastroyki|nastaveni|obchod|quotes|chart|history|"
+    r"settings|graph|graf)", re.I)
+_CHART_TIME_AXIS = re.compile(
+    r"\b\d{1,2}\s*(?:sep|sentabr|okt|oct|avg|apr|may|iyun|iyul|noy|dek)\b"
+    r"[\s\S]{0,160}\b\d{1,2}:\d{2}\b", re.I)
+_DIR_ANY = re.compile(
+    r"\b(?:buy|sell|long|short|olim|sotim|kotarilish|pasayish)\b", re.I)
+
+
+def _chart_veto(ocr: str, cap: str = "", has_image: bool = False) -> str:
+    """v77: rasm - FAQAT aniq savdo REJASI bo'lsa signal.
+
+    Foydalanuvchi shikoyati: MT5/mobil ilova GRAFIGI (narx o'qi, vaqt o'qi,
+    pastdagi menyu tugmalari) signal deb olinardi. Endi:
+      * 6+ ta "4 xonali.nuqta" narx darajasi -> grafik o'qi;
+      * vaqt o'qi (21 Sep 14:11 ... 18:59) -> grafik;
+      * menyu tugmalari (korrektirovka/trade/nastroyki) + o'q -> ilova skrinshoti;
+      * rasmda yo'nalish (BUY/SELL) va kamida 2 ta daraja bo'lmasa -> reja YO'Q.
+    """
+    if not has_image:
+        return ""
+    s = (ocr or "").strip()
+    px = set(_CHART_PX.findall(s))
+    if len(px) >= 6:
+        return "grafik skrinshoti (narx o'qi: %d daraja)" % len(px)
+    if _CHART_TIME_AXIS.search(s):
+        return "grafik skrinshoti (vaqt o'qi)"
+    if _CHART_UI.search(s) and len(px) >= 2:
+        return "terminal/ilova skrinshoti (menyu tugmalari + narx o'qi)"
+    _all = s + "\n" + (cap or "")
+    _nums = re.findall(r"\b\d{3,5}(?:[.,]\d{1,3})?\b", _all)
+    if not (_DIR_ANY.search(_all) and len(_nums) >= 2):
+        return "rasmda savdo rejasi yo'q (skrinshot)"
+    return ""
+
+
 def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     """Sabab qaytarsa — bu signal EMAS (qat'iy).
 
@@ -812,6 +851,9 @@ def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
         return "reklama/obuna posti"
     if _V_ANALYSIS.search(t) and not strong_dir and not has_plan:
         return "tahlil/yangilik posti"
+    # v77: yo'nalish yo'q, lekin 6+ narx darajasi - tahlil/grafik izohi, signal emas
+    if not strong_dir and len(set(_CHART_PX.findall(t))) >= 6:
+        return "tahlil/grafik posti (ko'p daraja, yo'nalish yo'q)"
     if _V_GREET.search(t) and not has_plan and not _num_count(t):
         return "salomlashish posti"
     return ""
@@ -898,14 +940,14 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     ocra = (ocr or "").strip()
     if not cap and not ocra:
         if has_image:
-            return None, "rasmda yozuv o'qilmadi", False
+            return None, "rasmda yozuv o'qilmadi (skrinshot)", True
         return None, "bo'sh xabar", False
     raw = "\n".join(p for p in (cap, ocra) if p)
     # v62: natija/otziv/bekor xabarlari — juftlik va kontekstdan qat'i nazar SIGNAL EMAS
     _early = _result_veto(raw, False) or _result_veto(cap, False)
     if not _early:
         # v70: OCR — MT5 terminal skrinshoti (ochiq bitim / history / P/L)
-        _early = _screen_veto(ocra, cap)
+        _early = _chart_veto(ocra, cap, has_image) or _screen_veto(ocra, cap)
     if _early:
         return None, _early, True
     body = _pre(raw)

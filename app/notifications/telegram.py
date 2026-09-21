@@ -157,6 +157,36 @@ def lot_money_line(balance: float = 0.0, risk_percent: float = 1.0, *,
     return txt
 
 
+def lots_entry_lines(signal, *, lot: float = 1.0, contract: float = 100.0) -> list[str]:
+    """v77: HAR BIR LOT - qanchadan ochilgani aniq ko'rinadi.
+
+    «📥 Lot 1: 0.50 lot · ochilish 4,348.68 · stop 4,351.08 · maqsad 4,345.68 (+3R)»
+    """
+    from app.engine.risk import lot_position_size, r_price
+    d = str(getattr(signal, "direction", "") or "").upper()
+    entry = float(getattr(signal, "entry", 0) or 0)
+    sl = float(getattr(signal, "sl", 0) or 0)
+    if entry <= 0 or sl <= 0 or d not in ("BUY", "SELL"):
+        return []
+    qty, risk_all = lot_position_size(abs(entry - sl), lot, contract)
+    if qty <= 0:
+        return []
+    half_lot = qty / 2.0 / (contract or 100.0)
+    half_risk = risk_all / 2.0
+    tp1 = float(getattr(signal, "tp1", 0) or 0)
+    tp2 = float(getattr(signal, "tp2", 0) or 0)
+    tp3 = float(getattr(signal, "tp3", 0) or 0)
+    return [
+        f"\U0001F4E5 <b>Lot 1</b>: {half_lot:,.2f} lot \u00B7 ochilish <b>{fmt_price(entry)}</b> "
+        f"\u00B7 stop {fmt_price(sl)} \u00B7 maqsad {fmt_price(tp3 or tp2 or tp1)} (+3R)"
+        f" \u00B7 risk {half_risk:,.2f}$",
+        f"\U0001F4E5 <b>Lot 2</b>: {half_lot:,.2f} lot \u00B7 ochilish <b>{fmt_price(entry)}</b> "
+        f"\u00B7 stop {fmt_price(sl)} (keyin +1R da {fmt_price(entry)}) "
+        f"\u00B7 maqsad {fmt_price(r_price(d, entry, sl, 4))} (+4R)"
+        f" \u00B7 risk {half_risk:,.2f}$",
+    ]
+
+
 def lot_money_text(pos) -> str:
     """v68: HAJM va shu hajmdagi pul — «0.50 lot · SL gacha 165.50$».
 
@@ -594,6 +624,10 @@ class TelegramNotifier:
             _lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
             _dist = abs(float(signal.entry or 0) - float(signal.sl or 0))
             text += "\n" + lot_money_line(bal, risk_pct, lot=_lot, risk_distance=_dist)
+            # v77: har bir lot qanchadan ochilgani - aniq narx bilan
+            _ctr = float(getattr(self._settings, "contract_size", 100.0) or 100.0)
+            for _ln in lots_entry_lines(signal, lot=_lot, contract=_ctr):
+                text += "\n" + _ln
         except Exception as exc:  # noqa: BLE001
             logger.debug("[NOTIFY] lot puli hisoblanmadi: %s", exc)
 

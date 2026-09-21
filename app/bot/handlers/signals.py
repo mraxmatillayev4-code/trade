@@ -82,6 +82,19 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         f"(Lot1 {'✅' if lot1 else '—'} · Lot2 {'✅' if lot2 else '—'})",
         f"   📥 Kirish: <b>{fmt_price(entry)}</b> · 🛑 Stop: <b>{fmt_price(sl)}</b>",
     ]
+    # v77: HAR BIR LOT — qanchadan ochilgani aniq (narx bilan, alohida qator)
+    for q in sorted(positions, key=lambda x: int(getattr(x, "stage", 0) or 0)):
+        _runner = int(getattr(q, "stage", 0) or 0) >= 10
+        _nom = "Lot 2 (+4R/+5R)" if _runner else "Lot 1 (+3R)"
+        _qty = float(getattr(q, "qty_total", 0) or 0)
+        _qlot = _qty / 100.0 if str(getattr(q, "symbol", "")).upper().startswith(
+            ("XAU", "GOLD")) else _qty
+        out.append(
+            f"   📦 <b>{_nom}</b>: {_qlot:,.2f} lot · ochilish "
+            f"<b>{fmt_price(float(getattr(q, 'entry', 0) or 0))}</b> · stop "
+            f"{fmt_price(float(getattr(q, 'sl', 0) or 0))} · qolgan "
+            f"{float(getattr(q, 'qty_remaining', 0) or 0) / 100.0:,.2f} lot"
+        )
     if price is None:
         out.append("   ⚠️ Joriy narx olinmadi (birja javob bermadi) — keyingi tsiklda qayta olinadi.")
         return out
