@@ -116,15 +116,22 @@ class Application:
             # Telegram chap burchakdagi "Menu" tugmasi (buyruqlar menyusi)
             from aiogram.types import BotCommand
             try:
+                # v62: botda MAVJUD bo'lgan BARCHA commandlar menyuga qo'yiladi
                 await self.bot.set_my_commands([
-                    BotCommand(command="start", description="🚀 Botni ishga tushirish / menyu"),
+                    BotCommand(command="start", description="🚀 Botni ishga tushirish"),
                     BotCommand(command="menu", description="☰ Pastki menyuni ochish"),
-                    BotCommand(command="akkaunt", description="👤 Telegram akkaunt ulash"),
-                    BotCommand(command="natija", description="📋 Oxirgi WIN/LOSE natijalar"),
                     BotCommand(command="kuzat", description="🔎 Jonli kuzatuv (narx va R darajalar)"),
+                    BotCommand(command="natija", description="📋 Oxirgi WIN/LOSE natijalar"),
                     BotCommand(command="hisob", description="💼 Virtual (paper) hisob"),
-                    BotCommand(command="100stat", description="📊 Kanal signallari statistikasi"),
-                    BotCommand(command="100fayl", description="📄 Kanallar bazasi (txt)"),
+                    BotCommand(command="akkaunt", description="👤 Telegram akkaunt ulash"),
+                    BotCommand(command="qr", description="🔳 Akkauntni QR bilan ulash"),
+                    BotCommand(command="forget", description="🚪 Akkauntni uzish"),
+                    BotCommand(command="100", description="🗂 Kanallardan 100 tadan xabar yozib olish"),
+                    BotCommand(command="100stat", description="📊 Baza statistikasi (kanallar)"),
+                    BotCommand(command="100fayl", description="📄 Baza (txt fayl)"),
+                    BotCommand(command="100ocr", description="🔤 Rasmlardan yozuvni o'qish (OCR)"),
+                    BotCommand(command="100test", description="🧪 Diagnostika (OCR zanjiri)"),
+                    BotCommand(command="tozalash", description="🧹 Hammasini tozalash (noldan)"),
                 ])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Bot komandalari o'rnatilmadi: %s", exc)

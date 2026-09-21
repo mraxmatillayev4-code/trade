@@ -276,7 +276,8 @@ _CLOSE_NOW = re.compile(
     r"\bsignal\s*off\b|\boff\s*qil|\bto'?xtat(?:dik|amiz)?\b|"
     r"\bclose\s*(?:now|all|trade|it)\b|\bsignalni\s*yop|"
     r"\bishlamaymiz\b|\bclosed\s*(?:in\s*)?(?:profit|loss)\b|"
-    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b|بسته|اغلق)",
+    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b|بسته|اغلق|\baktivmas\b|"
+    r"\baktiv\s*emas\b|\bfaol\s*emas\b)",
     re.I,
 )
 _YOPAMIZ = re.compile(r"\byopamiz\b|\byopish\b", re.I)

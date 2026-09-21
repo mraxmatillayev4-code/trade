@@ -11,7 +11,7 @@ from aiogram.types import Message
 
 from app.core.symbols import full_label
 from app.database.session import async_session_factory
-from app.notifications.telegram import fmt_price, lot_reason_text
+from app.notifications.telegram import fmt_price, lot_money_text, lot_reason_text
 from app.paper_trading.engine import PaperEngine
 
 router = Router(name="paper")
@@ -111,9 +111,11 @@ def _closed_block(group: list, open_pos: list) -> list[str]:
     for p in group:
         rr = getattr(p, "r_multiple", None)
         rr_txt = f"{float(rr):+.2f}R" if rr is not None else "—"
+        _money = lot_money_text(p)
         out.append(
             f"   📦 {_lot_name(p)}: <b>{rr_txt}</b> "
             f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · "
+            f"{_money + ' · ' if _money else ''}"
             f"📌 {lot_reason_text(getattr(p, 'close_reason', ''), rr)}"
         )
     # ikkinchi lot hali ochiq bo'lsa — aytib qo'yamiz
@@ -138,9 +140,10 @@ def _open_block(group: list) -> list[str]:
         f"{str(head.timeframe or '').upper()} · {len(group)} lot ochiq"
     ]
     for p in group:
+        _money = lot_money_text(p)
         out.append(
-            f"   📦 {_lot_name(p)}: kirish {fmt_price(p.entry)} | "
-            f"stop {fmt_price(p.sl)} | maqsad {fmt_price(p.tp3)}"
+            f"   📦 {_lot_name(p)}: <b>{_money}</b> · "
+            f"kirish {fmt_price(p.entry)} | stop {fmt_price(p.sl)} | maqsad {fmt_price(p.tp3)}"
         )
     return out
 

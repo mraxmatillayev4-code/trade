@@ -651,7 +651,7 @@ _V_HIT = re.compile(
     r"signal\s*yopildi|yopildi|итог|результат|профит\s*\+)", re.I)
 # 2-daraja: pip/foyda hisobi — reja (entry+SL) bo'lsa signal bo'lishi mumkin
 _V_RESULT = re.compile(
-    r"(\+\s*\d{2,4}\s*(pip|pips|punkt|%)|-\s*\d{2,4}\s*(pip|pips|punkt)|"
+    r"(\+\s*\d{2,4}\s*(pip|pips|punkt|%)|"
     r"\b(sumka|balans|depozit|withdraw|касса|kassa)\b)", re.I)
 
 _V_CLOSE = re.compile(
@@ -694,6 +694,57 @@ _EDU_RULE = re.compile(
     r"lot\s*\d|depozitni|90\s*%|95\s*%|100\s*%|ishonchli\s*signal|kafolat)", re.I)
 
 
+# --- v62: natija / otziv / bekor qilingan xabarlar (asosiy yolg'on signal manbai) ---
+_PIPS_WORD = re.compile(r"\b(pips?|punkt|point)\b", re.I)
+_PLAN_CUE62 = re.compile(
+    r"(buy|sell|long|short|entry|kirish|zona|zone|\bsl\b|\bstop|stoploss|tp\s*\d|"
+    r"target|take\s*profit|limit\s*order|order)", re.I)
+_PRICE_LIKE = re.compile(r"(\b\d{3,5}[.,]\d{2}\b|\b\d{4}\b)")
+_AKTIVMAS = re.compile(r"(aktivmas|aktiv\s*emas|faol\s*emas|otmena|отмена|не\s*активно)", re.I)
+_TICK_RESULT = re.compile(
+    r"(\u2705\s*\u2705|pips?\s*\u2705|profit\s*\u2705|oldi\s*\u2705|oldik\s*\u2705|"
+    r"pips?\s*\U0001f680|pips?\s*\U0001f525)", re.I)
+_OZIV_MARK = re.compile(
+    r"(zo[`']?r\s*signal|signal\s*zo[`']?r|rahmat|tashakkur|barakalla|shogird|"
+    r"o[`']?quvchi|yordi\b|foyda\s*oldim|katta\s*rahmat|minnatdor|maqtov|"
+    r"alhamdullilah|alhamdulillah)", re.I)
+_PAST_CLAIM = re.compile(r"(berdim|aytdim|aytgan\s*edim|bergan\s*edim|yozdim|dedim)", re.I)
+_LOSS_REPORT = re.compile(r"(?<![\w])(?:-\s*\d{1,4}\s*(?:pip|pips|punkt|point))(?![\w])", re.I)
+
+
+def _struck_share(t: str) -> float:
+    """Matnning qancha qismi ~~chizilgan~~ — bekor qilingan xabar belgisi."""
+    t = t or ""
+    if "~~" not in t:
+        return 0.0
+    n = sum(len(m.group(0)) for m in re.finditer(r"~~.+?~~", t, re.S))
+    return n / max(1, len(t))
+
+
+def _result_veto(text: str, has_plan: bool) -> str:
+    """v62: '50 pips🚀', 'aktivmas', chizilgan xabar, obunachi otzivi — SIGNAL EMAS."""
+    s = text or ""
+    if _AKTIVMAS.search(s):
+        return "bekor qilingan xabar (aktivmas)"
+    if _struck_share(s) >= 0.45:
+        return "chizilgan (bekor qilingan) xabar"
+    price_like = bool(_PRICE_LIKE.search(s))
+    plan = bool(_PLAN_CUE62.search(s))
+    if _PIPS_WORD.search(s) and not plan and not price_like:
+        return "natija xabari (pips hisoboti)"
+    for m in _LOSS_REPORT.finditer(s):
+        pre = s[max(0, m.start() - 16):m.start()]
+        if not _PLAN_CUE62.search(pre):
+            return "natija xabari (zarar hisoboti)"
+    if _TICK_RESULT.search(s) and not price_like:
+        return "natija xabari (natija belgisi)"
+    if _OZIV_MARK.search(s) and not has_plan and not price_like:
+        return "obunachi izohi/otziv"
+    if _PAST_CLAIM.search(s) and not has_plan and not price_like:
+        return "eski signalga ishora (yangi signal emas)"
+    return ""
+
+
 def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     """Sabab qaytarsa — bu signal EMAS (qat'iy).
 
@@ -701,6 +752,10 @@ def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     Kuchli "natija" belgilari reja bo'lmasa har doim veto qiladi.
     """
     t = text or ""
+    # v62: matn `_pre()` bilan tozalanganda ~~ va emoji yo'qoladi — xom matnni ham tekshiramiz
+    _v62 = _result_veto(t, has_plan) or _result_veto(raw or "", has_plan)
+    if _v62:
+        return _v62
     if _V_WARN.search(t):
         return "firibgarlik ogohlantirishi/reklama"
     if _SOFT_COMMENT.search(t) and not has_plan:
@@ -806,6 +861,10 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
             return None, "rasmda yozuv o'qilmadi", False
         return None, "bo'sh xabar", False
     raw = "\n".join(p for p in (cap, ocra) if p)
+    # v62: natija/otziv/bekor xabarlari — juftlik va kontekstdan qat'i nazar SIGNAL EMAS
+    _early = _result_veto(raw, False) or _result_veto(cap, False)
+    if _early:
+        return None, _early, True
     body = _pre(raw)
     toks = [t for t in body.split() if t]
     if not toks:

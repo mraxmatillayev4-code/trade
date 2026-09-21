@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     channel_timeframe: str = "1m"        # kanal signali yozilmagan bo'lsa shu TF
     channel_use_post_tp: bool = True     # kanal o'zi yozgan TP larni ishlatish
     channel_expiry_minutes: int = 240    # M1 signal shu daqiqada yopilmasa: muddat tugadi
+    max_active_signals: int = 3           # v62: bir vaqtda ochiq signal chegarasi (navbat yo'q)
     expiry_sweep_seconds: int = 300      # muddat tekshiruvi davri (sekund)
     # v56: kanal yangi ulanganda TARIX o'qilmaydi (0 = umuman o'qilmasin).
     # 2 qilsangiz — oxirgi 2 ta eski xabar o'qiladi (odatda kerak emas).

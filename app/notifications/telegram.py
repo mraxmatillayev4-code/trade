@@ -138,6 +138,29 @@ _LOT_REASON = {
 }
 
 
+def lot_money_line(balance: float, risk_percent: float = 1.0) -> str:
+    """v62: «💵 Har lot: 50.00$ (2 lot · jami 100.00$ · hisob 10 000.00$)»."""
+    half = float(balance or 0) * float(risk_percent or 1.0) / 200.0
+    return (f"\U0001F4B5 <b>Har lot: {half:,.2f}$</b> "
+            f"(2 lot \u00B7 jami {half * 2:,.2f}$ \u00B7 hisob {float(balance or 0):,.2f}$)")
+
+
+def lot_money_text(pos) -> str:
+    """v62: lot NEChA DOLLARDAN ochilgani — «50.00$ · 0.151 lot»."""
+    risk = float(getattr(pos, "risk_amount", 0) or 0)
+    qty = float(getattr(pos, "qty_total", 0) or 0)
+    sym = str(getattr(pos, "symbol", "") or "").upper()
+    parts: list[str] = []
+    if risk > 0:
+        parts.append(f"{risk:,.2f}$")
+    if qty > 0:
+        if sym.startswith(("XAU", "GOLD")):
+            parts.append(f"{qty / 100.0:,.3f} lot")
+        else:
+            parts.append(f"hajm {qty:,.4f}")
+    return " · ".join(parts)
+
+
 def lot_reason_text(reason: str | None, r: float | None = None) -> str:
     """Lot yopilish sababi. Himoya stopida FOYDA bilan yopilgan bo'lsa — aniq yozamiz."""
     raw = str(reason or "").strip().upper()
@@ -384,9 +407,11 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
             cash += pnl_p
             runner = int(getattr(pos, "stage", 0) or 0) >= 10
             nom = "Lot 2 (+4R/+5R)" if runner else "Lot 1 (+3R)"
+            _money = lot_money_text(pos)
             lot_lines.append(
                 f"   \U0001F4E6 {nom}: <b>{rr:+.2f}R</b>  ({pnl_p:+,.2f}$) "
-                f"\u00B7 {lot_reason_text(getattr(pos, 'close_reason', ''), rr)}"
+                f"\u00B7 {_money + ' \u00B7 ' if _money else ''}"
+                f"{lot_reason_text(getattr(pos, 'close_reason', ''), rr)}"
             )
             brief.append(f"Lot{i} {rr:+.2f}R ({pnl_p:+,.2f}$)")
         # HAR IKKALA lot yoziladi; biri hali ochiq bo'lsa ham nomi turadi
@@ -544,6 +569,18 @@ class TelegramNotifier:
         if not targets:
             logger.error("[NOTIFY] recipients 0 VA admin yo'q — #%s yuborilmadi", signal.id)
             return
+
+        # v62: lotlar necha dollardan ochilgani (birinchi foydalanuvchi hisobi bo'yicha)
+        try:
+            from app.paper_trading.engine import PaperEngine
+            async with _session() as s2:
+                acc = await PaperEngine().get_account(s2, targets[0])
+                bal = float(getattr(acc, "balance", 0) or 0)
+                risk_pct = float(getattr(self._settings, "risk_percent", 1.0) or 1.0)
+            if bal > 0:
+                text += "\n" + lot_money_line(bal, risk_pct)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[NOTIFY] lot puli hisoblanmadi: %s", exc)
 
         await self._send(text, targets, reply_markup=reply_markup)
         logger.info("[NOTIFY] signal #%s %s → %d foydalanuvchiga yuborildi",

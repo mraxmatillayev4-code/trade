@@ -631,6 +631,42 @@ async def _ensure_schema(session, force: bool = False) -> str:
 
 # ==========================================================================
 
+async def _active_signals_count(session) -> int:
+    """v62: bir vaqtda ochiq signallar soni (ochiq lotlar + faol signal yozuvlari)."""
+    from sqlalchemy import func, select
+
+    from app.core.enums import PaperStatus
+    from app.database.models.paper import PaperPosition
+    from app.database.models.signal import Signal
+
+    n = 0
+    try:
+        r = await session.execute(
+            select(func.count(func.distinct(PaperPosition.signal_id))).where(
+                PaperPosition.status == PaperStatus.OPEN.value,
+                PaperPosition.signal_id.isnot(None),
+            )
+        )
+        n = int(r.scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] ochiq lotlar sanovi: %s", exc)
+    try:
+        r2 = await session.execute(
+            select(func.count(Signal.id)).where(Signal.is_active.is_(True))
+        )
+        n = max(n, int(r2.scalar() or 0))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] faol signallar sanovi: %s", exc)
+    return n
+
+
+async def _limit_blocked(session, settings) -> tuple[bool, int, int]:
+    """v62: (bloklanganmi, ochiq soni, limit) — bir vaqtda maks. N ta faol signal."""
+    limit_act = int(getattr(settings, "max_active_signals", 3) or 3)
+    n_act = await _active_signals_count(session)
+    return (n_act >= limit_act), n_act, limit_act
+
+
 async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
     # v46: jadval ustunlari joyidami — yo'q bo'lsa qo'shamiz
     try:
@@ -757,6 +793,27 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
         f"Muddat: {int(getattr(settings, 'channel_expiry_minutes', 240))} daqiqa\n"
         f"<code>{snippet}</code>"
     )
+    # v62: bir vaqtda ko'pi bilan N ta faol signal. Ortiqchasi TASHLANADI (navbat yo'q —
+    # bittasi yopilgach ham eski signal qaytarilmaydi, faqat keyingi YANGI signal olinadi).
+    try:
+        _blocked, n_act, limit_act = await _limit_blocked(session, settings)
+        if _blocked:
+            logger.warning(
+                "[CH] LIMIT %d/%d — yangi signal qabul qilinmadi: %s %s (%s)",
+                n_act, limit_act, symbol, direction.value, src)
+            try:
+                await tell_admin(
+                    f"\u23F8 <b>Faol signal chegarasi</b>: {n_act}/{limit_act} ta ochiq.\n"
+                    f"Yangi signal tashlab yuborildi — {symbol} {direction.value} ({_esc(src)}).\n"
+                    "<i>Bittasi yopilgach, bot keyingi YANGI signalni oladi; eski signalni "
+                    "qaytarmaydi.</i>"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return "limit"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] limit tekshiruvi: %s", exc)
+
     total = 0
     try:
         total = await crud.count_signals(session)
