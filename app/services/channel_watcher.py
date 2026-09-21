@@ -43,6 +43,11 @@ _status: dict = {
 }
 
 
+def get_client():
+    """Faol Telethon klienti (yozib olish/dump uchun)."""
+    return _client
+
+
 def get_status() -> dict:
     return dict(_status)
 

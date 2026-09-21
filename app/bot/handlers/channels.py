@@ -1,12 +1,14 @@
 """📡 Kanallar — ulash, o'chirish, har kanal statistikasi."""
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command, Filter
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 from sqlalchemy import select
 
 from app.bot import keyboards as kb
@@ -217,6 +219,123 @@ async def channels_menu(message: Message, state) -> None:
     await message.answer(text, parse_mode="HTML", reply_markup=kb.channels_reply(
         _is_admin(message.from_user.id if message.from_user else None)
     ))
+
+
+# ===================== /100 — kanallardan xabar yozib olish =====================
+_DUMP_TASK: asyncio.Task | None = None
+
+
+async def _dump_job(message: Message, limit: int) -> None:
+    try:
+        from app.services import channel_archive as arc
+
+        res = await arc.dump(limit=limit)
+        lines = [f"\U0001F4E5 <b>Kanallardan yozib olindi</b> (limit {res.get('limit')})", ""]
+        lines.append(
+            f"Kanallar: <b>{res.get('ok')}/{res.get('channels')}</b> | "
+            f"xabar: <b>{res.get('saved')}</b> | eski o'chirildi: {res.get('deleted')} | "
+            f"{res.get('secs')}s"
+        )
+        if res.get("fail"):
+            lines.append("\u26A0\uFE0F O'qilmadi: " + ", ".join(str(x) for x in res["fail"][:8]))
+        for p in (res.get("per") or [])[:15]:
+            lines.append(f"\u2022 {p['name']}: {p['n']} ta ({p['text']} matnli)")
+        if res.get("error"):
+            lines.append(f"\u274C {res['error']}")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+        name, data = await arc.export_txt()
+        await message.answer_document(
+            BufferedInputFile(data, filename=name),
+            caption="\U0001F4C4 Barcha yozilgan xabarlar (kanal bo'yicha).",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[CH-DUMP] job: %s", exc)
+        await message.answer(f"\u274C Xato: {type(exc).__name__}: {exc}")
+
+
+async def _ocr_job(message: Message, per: int) -> None:
+    try:
+        from app.services import channel_archive as arc
+
+        res = await arc.ocr_pass(per_channel=per)
+        await message.answer(
+            "\U0001F524 <b>Rasmlardagi yozuv o'qildi</b>\n"
+            f"o'qildi: <b>{res.get('done')}</b> | bo'sh: {res.get('empty')} | "
+            f"xato: {res.get('fail')} | {res.get('secs')}s"
+            + (f"\n\u274C {res['error']}" if res.get("error") else ""),
+            parse_mode="HTML",
+        )
+        name, data = await arc.export_txt()
+        await message.answer_document(BufferedInputFile(data, filename=name),
+                                      caption="\U0001F4C4 OCR qo'shilgan fayl.")
+    except Exception as exc:  # noqa: BLE001
+        await message.answer(f"\u274C Xato: {type(exc).__name__}: {exc}")
+
+
+@router.message(Command("100"))
+async def cmd_dump100(message: Message) -> None:
+    """Barcha kanallardan oxirgi 100 tadan xabarni bazaga yozadi."""
+    global _DUMP_TASK
+    if not _is_admin(getattr(message.from_user, "id", None)):
+        return
+    if _DUMP_TASK and not _DUMP_TASK.done():
+        await message.reply("\u23F3 Avvalgi yozib olish tugamadi. Kuting...")
+        return
+    limit = 100
+    for part in (message.text or "").split()[1:]:
+        if part.isdigit():
+            limit = max(5, min(int(part), 300))
+    await message.reply(
+        f"\u23F3 <b>{limit}</b> tadan xabar yozib olinmoqda (reply lar bilan)...\n"
+        "1-3 daqiqa. Tugagach fayl yuboraman.",
+        parse_mode="HTML",
+    )
+    _DUMP_TASK = asyncio.create_task(_dump_job(message, limit))
+
+
+@router.message(Command("100ocr"))
+async def cmd_dump100ocr(message: Message) -> None:
+    """Rasm xabarlaridagi yozuvni OCR qilib bazaga qo'shadi."""
+    global _DUMP_TASK
+    if not _is_admin(getattr(message.from_user, "id", None)):
+        return
+    if _DUMP_TASK and not _DUMP_TASK.done():
+        await message.reply("\u23F3 Avvalgi vazifa tugamadi. Kuting...")
+        return
+    per = 30
+    for part in (message.text or "").split()[1:]:
+        if part.isdigit():
+            per = max(5, min(int(part), 100))
+    await message.reply(f"\U0001F524 Har kanaldan {per} ta rasm o'qilmoqda...", parse_mode="HTML")
+    _DUMP_TASK = asyncio.create_task(_ocr_job(message, per))
+
+
+@router.message(Command("100stat"))
+async def cmd_dump100stat(message: Message) -> None:
+    if not _is_admin(getattr(message.from_user, "id", None)):
+        return
+    from app.services import channel_archive as arc
+
+    st = await arc.stats()
+    lines = [f"\U0001F5C3 Bazadagi xabarlar: <b>{st.get('total')}</b>", ""]
+    for c in (st.get("channels") or [])[:20]:
+        lines.append(f"\u2022 {c['title'] or c['key']}: <b>{c['n']}</b> ta")
+    if st.get("error"):
+        lines.append(f"\u274C {st['error']}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("100fayl"))
+async def cmd_dump100file(message: Message) -> None:
+    if not _is_admin(getattr(message.from_user, "id", None)):
+        return
+    from app.services import channel_archive as arc
+
+    name, data = await arc.export_txt()
+    await message.answer_document(BufferedInputFile(data, filename=name),
+                                  caption="\U0001F4C4 Bazadagi barcha xabarlar.")
+# ===============================================================================
+
 
 
 @router.message(ChannelState.menu, F.text == "⬅️ Orqaga")
