@@ -134,29 +134,42 @@ class Application:
                 ("100test", "🧪 Diagnostika"),
                 ("tozalash", "🧹 Hammasini tozalash (noldan)"),
             ]
-            # v70: «MENU» tugmasi OLIB TASHLANDI (foydalanuvchi "kerak emas" dedi).
-            # Telegram ro'yxati o'chiriladi + tugma default holatga qaytariladi;
-            # commandlar o'zi ishlayveradi (yozilsa), faqat ro'yxat oynasi chiqmaydi.
+            # v72: Chap pastdagi KO'K «Menu» tugmasi QAYTARILDI (foydalanuvchi so'radi).
+            # Faqat pastdagi (reply) klaviaturaning ichidagi «☰ Menyu» tugmasi olib
+            # tashlangan edi — bu ko'k Menu klaviatura tugmasi emas, u Telegramning
+            # o'z tugmasi va commandlar ro'yxatini ochadi.
             _safe = [BotCommand(command=c, description=d) for c, d in _cmds
                      if _re.fullmatch(r"[a-z0-9_]{1,32}", c)]
+            _done: list[str] = []
             try:
-                await self.bot.delete_my_commands()
-                logger.info("[BOT] commandlar ro'yxati o'chirildi (v70 - MENU tugmasi yo'q)")
+                await self.bot.set_my_commands(_safe)
+                _done = [c.command for c in _safe]
+                logger.info("[BOT] commandlar menyusi: %d ta", len(_safe))
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[BOT] delete_my_commands: %s", exc)
+                logger.warning("[BOT] komandalar to'liq o'rnatilmadi (%s) - harfdan boshlanadiganlari", exc)
+                _safe2 = [c for c in _safe if not c.command[0].isdigit()]
+                try:
+                    await self.bot.set_my_commands(_safe2)
+                    _done = [c.command for c in _safe2]
+                except Exception as exc2:  # noqa: BLE001
+                    logger.error("[BOT] komandalar o'rnatilmadi: %s", exc2)
             try:
-                from aiogram.types import MenuButtonDefault
-                await self.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
-                logger.info("[BOT] MENU tugmasi olib tashlandi (v70)")
+                from aiogram.types import MenuButtonCommands
+                await self.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+                logger.info("[BOT] ko'k MENU tugmasi o'rnatildi (v72)")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[BOT] MENU tugmasini olib tashlash: %s", exc)
+                logger.warning("[BOT] MENU tugmasi: %s", exc)
             try:
-                await self.notifier.send_admin(
-                    "\u2705 <b>v70 tayyor</b>\n"
-                    "\u2022 MENU tugmasi olib tashlandi (commandlar yozilsa ishlayveradi).\n"
-                    "\u2022 Terminal skrinshotlari (P/L, +48.69 USD) endi SIGNAL emas.\n"
-                    "\u2022 Bir xil xabar qayta ishlanmaydi - takroriy ogohlantirish yo'q."
-                )
+                _txt = ("\u2705 <b>SINO AI tayyor (v72)</b>\n"
+                        "\u2022 Chap pastdagi ko'k <b>Menu</b> tugmasi joyida (commandlar ro'yxati).\n"
+                        "\u2022 Pastdagi klaviaturadan faqat «\u2630 Menyu» olib tashlangan; "
+                        "klaviatura yashirinadigan.\n"
+                        "\u2022 Kanal o'chirish: \U0001F5D1 tugma - BITTA bosishda o'chadi "
+                        "(«\u21A9\uFE0F Qaytarish» bor).\n"
+                        "\u2022 Terminal skrinshotlari (P/L) signal emas; bir xil xabar takror ishlanmaydi.")
+                if _done:
+                    _txt += "\nCommandlar: " + ", ".join("/" + c for c in _done[:8]) + " ..."
+                await self.notifier.send_admin(_txt)
             except Exception:  # noqa: BLE001
                 pass
         else:
