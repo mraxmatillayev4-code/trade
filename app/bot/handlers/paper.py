@@ -58,6 +58,92 @@ def _dur(p) -> str:
     return _duration_text(getattr(p, "opened_at", None), getattr(p, "closed_at", None))
 
 
+def _lot_name(p) -> str:
+    """Lot 2 — runner (stage 10+), Lot 1 — oddiy (stage 0..3)."""
+    return "Lot 2 (+4R/+5R)" if int(getattr(p, "stage", 0) or 0) >= 10 else "Lot 1 (+3R)"
+
+
+def _lot_short(p) -> str:
+    return "Lot 2" if int(getattr(p, "stage", 0) or 0) >= 10 else "Lot 1"
+
+
+def _group_rows(rows: list) -> list[list]:
+    """Bitimni (signalni) bo'yicha guruhlaydi — LOTLAR BIRGA ko'rsatiladi."""
+    groups: dict = {}
+    order: list = []
+    for p in rows:
+        key = getattr(p, "signal_id", None)
+        if key is None:
+            key = ("x", id(p))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(p)
+    return [groups[k] for k in order]
+
+
+def _sort_lots(group: list) -> list:
+    """Lot 1 doim birinchi."""
+    return sorted(group, key=lambda p: int(getattr(p, "stage", 0) or 0))
+
+
+def _grp_pnl(group: list) -> tuple[float, float]:
+    """(jami $, o'rtacha R) — R = jami pul / jami risk (risk yo'q bo'lsa lotlar R i)."""
+    cash = sum(float(getattr(p, "realized_pnl", 0) or 0) for p in group)
+    risk = sum(float(getattr(p, "risk_amount", 0) or 0) for p in group)
+    if risk > 0:
+        return cash, cash / risk
+    r_vals = [float(p.r_multiple) for p in group
+              if getattr(p, "r_multiple", None) is not None]
+    return cash, (sum(r_vals) / len(r_vals) if r_vals else 0.0)
+
+
+def _closed_block(group: list, open_pos: list) -> list[str]:
+    """Bitta bitim: IKKALA lot alohida + jami."""
+    group = _sort_lots(group)
+    head = group[0]
+    cash, r_avg = _grp_pnl(group)
+    ico = "🟢" if cash >= 0 else "🔴"
+    out = [
+        f"{ico} <b>{full_label(head.symbol)}</b> {head.direction} · "
+        f"{str(head.timeframe or '').upper()} · {len(group)} lot"
+    ]
+    for p in group:
+        rr = getattr(p, "r_multiple", None)
+        rr_txt = f"{float(rr):+.2f}R" if rr is not None else "—"
+        out.append(
+            f"   📦 {_lot_name(p)}: <b>{rr_txt}</b> "
+            f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · 📌 {_reason(p)}"
+        )
+    # ikkinchi lot hali ochiq bo'lsa — aytib qo'yamiz
+    if len(group) == 1:
+        sid = getattr(head, "signal_id", None)
+        still = [p for p in open_pos if getattr(p, "signal_id", None) == sid]
+        if still:
+            names = ", ".join(_lot_short(p) for p in still)
+            out.append(f"   🕐 {names} hali ochiq — natijasi keyin qo'shiladi")
+    r_txt = f"{r_avg:+.2f}R" + (" (2 lot o'rtachasi)" if len(group) > 1 else "")
+    out.append(f"   💵 Jami: <b>{cash:+,.2f}$</b> · {r_txt}")
+    out.append(f"   🏁 {_when(getattr(group[-1], 'closed_at', None))} · ⏳ {_dur(group[-1])}")
+    return out
+
+
+def _open_block(group: list) -> list[str]:
+    """Ochiq bitim: ikkala lot ham alohida yoziladi."""
+    group = _sort_lots(group)
+    head = group[0]
+    out = [
+        f"🟢 <b>{full_label(head.symbol)}</b> {head.direction} · "
+        f"{str(head.timeframe or '').upper()} · {len(group)} lot ochiq"
+    ]
+    for p in group:
+        out.append(
+            f"   📦 {_lot_name(p)}: kirish {fmt_price(p.entry)} | "
+            f"stop {fmt_price(p.sl)} | maqsad {fmt_price(p.tp3)}"
+        )
+    return out
+
+
 def _account_lines(acc, open_pos, closed) -> list[str]:
     pnl = acc.balance - acc.initial_balance
     pnl_pct = (pnl / acc.initial_balance * 100) if acc.initial_balance else 0.0
@@ -80,23 +166,13 @@ def _account_lines(acc, open_pos, closed) -> list[str]:
         "⚠️ Bu soxta (virtual) pul — haqiqiy pul ishlatilmaydi.",
     ]
     if open_pos:
-        lines.append("\n<b>Sizning ochiq bitimlaringiz:</b>")
-        for p in open_pos[:10]:
-            ico = "🟢" if p.direction == "BUY" else "🔴"
-            lot = "Lot2 +4R/+5R" if int(getattr(p, "stage", 0) or 0) >= 10 else "Lot1 +3R"
-            lines.append(
-                f"{ico} {full_label(p.symbol)} {p.timeframe.upper()} {p.direction} · {lot}\n"
-                f"   Kirish: {fmt_price(p.entry)} | Stop: {fmt_price(p.sl)} | Maqsad: {fmt_price(p.tp3)}"
-            )
+        lines.append("\n<b>Sizning ochiq bitimlaringiz (lotlar bilan):</b>")
+        for grp in _group_rows(open_pos)[:5]:
+            lines.extend(_open_block(grp))
     if closed:
-        lines.append("\n<b>So'nggi yopilgan bitimlaringiz:</b>")
-        for p in closed[:5]:
-            r = f" ({p.r_multiple:+.2f}R)" if p.r_multiple is not None else ""
-            ico = "🟢" if (p.realized_pnl or 0) >= 0 else "🔴"
-            lines.append(
-                f"{ico} {full_label(p.symbol)} {p.direction}: {p.realized_pnl:+.2f}${r}\n"
-                f"   📌 {_reason(p)} · 🏁 {_when(p.closed_at)} · ⏳ {_dur(p)}"
-            )
+        lines.append("\n<b>So'nggi yopilgan bitimlaringiz (lotlar bilan):</b>")
+        for grp in _group_rows(closed)[:5]:
+            lines.extend(_closed_block(grp, open_pos))
     return lines
 
 
@@ -121,18 +197,27 @@ async def last_results(message: Message) -> None:
         "📋 <b>OXIRGI NATIJALAR (WIN / LOSE)</b>",
         "━━━━━━━━━━━━━━━━",
     ]
-    for p in closed:
-        win = (p.realized_pnl or 0) > 0.05
+    for grp in _group_rows(closed)[:10]:
+        grp = _sort_lots(grp)
+        cash, r_avg = _grp_pnl(grp)
+        win = cash > 0.05
+        head = grp[0]
         out.append(
-            f"{'✅' if win else '❌'} <b>{full_label(p.symbol)}</b> {p.direction} "
-            f"{str(p.timeframe or '').upper()}\n"
-            f"   📌 Sabab: <b>{_reason(p)}</b>\n"
-            f"   🕐 Ochilgan: {_when(getattr(p, 'opened_at', None))}\n"
-            f"   🏁 Yopilgan: {_when(getattr(p, 'closed_at', None))}  (⏳ {_dur(p)})\n"
-            f"   📥 {fmt_price(p.entry)} → 🏁 {fmt_price(getattr(p, 'close_price', None))}\n"
-            f"   💵 {p.realized_pnl:+,.2f}$ "
-            f"({'%+.2fR' % p.r_multiple if p.r_multiple is not None else '—'})"
+            f"{'✅' if win else '❌'} <b>{full_label(head.symbol)}</b> {head.direction} "
+            f"{str(head.timeframe or '').upper()} · <b>{len(grp)} lot</b>\n"
+            f"   🕐 Ochilgan: {_when(getattr(head, 'opened_at', None))}\n"
+            f"   🏁 Yopilgan: {_when(getattr(head, 'closed_at', None))}  (⏳ {_dur(head)})"
         )
+        for p in grp:
+            rr = getattr(p, "r_multiple", None)
+            rr_txt = ("%+.2fR" % rr) if rr is not None else "—"
+            out.append(
+                f"   📦 {_lot_name(p)}: <b>{rr_txt}</b> "
+                f"({float(getattr(p, 'realized_pnl', 0) or 0):+,.2f}$) · 📌 {_reason(p)}\n"
+                f"        📥 {fmt_price(p.entry)} → 🏁 {fmt_price(getattr(p, 'close_price', None))}"
+            )
+        r_txt = f"{r_avg:+.2f}R" + (" (2 lot o'rtachasi)" if len(grp) > 1 else "")
+        out.append(f"   💵 Jami: <b>{cash:+,.2f}$</b> · {r_txt}")
     out += [
         "━━━━━━━━━━━━━━━━",
         f"🏦 Balans: <b>${summary['balance']:,.2f}</b>  {icon} "

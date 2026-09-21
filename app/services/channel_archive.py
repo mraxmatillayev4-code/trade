@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from app.core.logging import get_logger
+from app.core.timeuz import stamp_tashkent, to_tashkent
 from app.database.session import async_session_factory
 from app.services.channel_store import display_name, list_channels, peer_bare, stat_key
 
@@ -571,12 +572,13 @@ async def test_one(limit_channel: int = 0, client=None) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _fmt_date(v) -> str:
+    """Sana — TOSHKENT vaqti bilan (UTC saqlanadi, ko'rsatish mahalliy)."""
     if v is None:
         return "?"
     if isinstance(v, str):
         return v[:16].replace("T", " ")
     try:
-        return v.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        return to_tashkent(v).strftime("%Y-%m-%d %H:%M")
     except Exception:  # noqa: BLE001
         try:
             return v.strftime("%Y-%m-%d %H:%M")
@@ -588,7 +590,7 @@ async def export_txt() -> tuple[str, bytes]:
     """(fayl nomi, baytlar) — barcha yozilgan xabarlar, kanal bo'yicha."""
     lines: list[str] = []
     lines.append("SINO KANAL XABARLARI (oxirgi dump)")
-    lines.append(f"Vaqt: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append(f"Vaqt: {stamp_tashkent()} (Toshkent)")
     lines.append("Format: [msg_id] sana | bayroqlar | reply")
     lines.append("=" * 78)
     try:
@@ -624,5 +626,5 @@ async def export_txt() -> tuple[str, bytes]:
     except Exception as exc:  # noqa: BLE001
         lines.append(f"XATO: {type(exc).__name__}: {exc}")
     data = ("\n".join(lines) + "\n").encode("utf-8")
-    name = f"sino_kanallar_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.txt"
+    name = f"sino_kanallar_{to_tashkent().strftime('%Y%m%d_%H%M')}.txt"
     return name, data

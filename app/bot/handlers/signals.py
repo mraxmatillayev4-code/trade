@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards as kb
 from app.core.symbols import full_label
+from app.core.timeuz import format_short
 from app.database import crud
 from app.database.session import async_session_factory
 from app.notifications.telegram import fmt_price, format_signal_full, format_signal_short
@@ -33,12 +34,13 @@ async def _render_signals(filter_key: str) -> str:
     for s in signals:
         icon = "🟢" if s.direction == "BUY" else "🔴"
         pair = full_label(s.symbol)
-        r = f" ({s.r_multiple:+.2f}R)" if s.r_multiple is not None else ""
+        r = (f" ({s.r_multiple:+.2f}R \u00B7 2 lot o'rtachasi)"
+             if s.r_multiple is not None else "")
         lines.append(
             f"{icon} <b>{pair}</b> {s.timeframe.upper()} • "
             f"{s.score:.1f}/10 • {STATUS_UZ.get(s.status, s.status)}{r}\n"
             f"   Kirish: {fmt_price(s.entry)} | "
-            f"{s.created_at.strftime('%d.%m %H:%M')} UTC"
+            f"{format_short(s.created_at)}"
         )
     return "\n".join(lines)
 

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeuz import to_tashkent
 from app.core.security import verify_webhook_signature
 from app.database import crud
 from app.database.models.backtest import Backtest
@@ -47,7 +48,7 @@ def create_app() -> FastAPI:
     @app.get("/")
     @app.api_route("/health", methods=["GET", "HEAD"])
     async def health() -> dict:
-        return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+        return {"status": "ok", "time": to_tashkent().isoformat()}
 
     @app.get("/api/signals")
     async def list_signals(limit: int = 20, direction: str | None = None) -> list[dict]:

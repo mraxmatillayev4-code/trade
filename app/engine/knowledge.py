@@ -19,6 +19,7 @@ from pathlib import Path
 from threading import Lock
 
 from app.core.logging import get_logger
+from app.core.timeuz import stamp_tashkent
 
 logger = get_logger(__name__)
 
@@ -200,7 +201,7 @@ class KnowledgeBase:
                         les.source = src
                     hits += 1
         from datetime import datetime, timezone
-        self.last_study = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        self.last_study = stamp_tashkent() + " (Toshkent)"
         self.save()
         logger.info("[AI-WEB] o'rganish: %d ta kalit mosligi, darslar=%d", hits, len(self.lessons))
         return hits

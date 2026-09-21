@@ -9,6 +9,8 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from app.core.timeuz import TASHKENT
+
 
 def _fp(p: float) -> str:
     """Narxni o'qiladigan formatda (ilmiy formatsiz)."""
@@ -24,7 +26,9 @@ def render_signal_chart(df: pd.DataFrame, direction: str, entry: float,
                         symbol: str, timeframe: str, score: float,
                         candles: int = 70) -> bytes:
     data = df.tail(candles).copy().reset_index(drop=True)
-    x = pd.to_datetime(data["open_time"], utc=True)
+    # Grafik o'qi TOSHKENT vaqti bilan (shamlar UTC da saqlanadi)
+    x = (pd.to_datetime(data["open_time"], utc=True)
+         .dt.tz_convert(TASHKENT).dt.tz_localize(None))
 
     fig, ax = plt.subplots(figsize=(11, 6.5), dpi=110)
     fig.patch.set_facecolor("#0f1420")

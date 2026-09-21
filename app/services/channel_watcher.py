@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from datetime import datetime, timezone
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeuz import hms_tashkent, stamp_tashkent
 from app.database.session import async_session_factory
 from app.services.channel_inbox import ingest_raw, ping_admin
 from app.services.channel_store import (
@@ -38,6 +40,7 @@ _status: dict = {
     "authorized": False,
     "account": "",
     "last_poll": "",
+    "last_poll_local": "",
     "last_error": "",
     "seen": 0,
     "signals": 0,
@@ -57,8 +60,24 @@ def get_status() -> dict:
     return dict(_status)
 
 
+_last_note_msg = ""
+_last_note_at = 0.0
+_last_note_repeat = 0
+
+
 def _note(msg: str) -> None:
-    line = f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {msg}"
+    """Holat qatori — TO'SHKENT vaqti bilan; bir xil satr 60 s ichida takrorlanmaydi."""
+    global _last_note_msg, _last_note_at, _last_note_repeat
+    now = time.monotonic()
+    if msg == _last_note_msg and (now - _last_note_at) < 60:
+        _last_note_repeat += 1
+        _last_note_at = now
+        return
+    extra = f" (yuqoridagi {_last_note_repeat} marta takrori yashirildi)" if _last_note_repeat else ""
+    _last_note_msg = msg
+    _last_note_at = now
+    _last_note_repeat = 0
+    line = f"{hms_tashkent()} {msg}{extra}"
     rec = list(_status.get("recent") or [])
     rec.insert(0, line)
     _status["recent"] = rec[:24]
@@ -240,6 +259,7 @@ async def _poll_once(client) -> None:
         _status["channels_ok"] = []
         _status["channels_fail"] = []
         _status["last_poll"] = datetime.now(timezone.utc).isoformat()
+        _status["last_poll_local"] = stamp_tashkent()
         return
     catchup_n = 0
     try:
@@ -305,6 +325,7 @@ async def _poll_once(client) -> None:
     _status["channels_ok"] = ok
     _status["channels_fail"] = fail
     _status["last_poll"] = datetime.now(timezone.utc).isoformat()
+    _status["last_poll_local"] = stamp_tashkent()
 
 
 async def _on_listed(event) -> None:

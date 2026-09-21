@@ -453,7 +453,7 @@ async def build_full_report(session, period: str, user_id=None, target_date=None
         r = s.r_multiple or 0
         emo = "🏆" if r > 0.05 else ("🔵" if abs(r) <= 0.05 else "💥")
         L.append(f"  {emo} {full_label(s.symbol)} {s.timeframe.upper()} {s.direction} "
-                 f"→ {r:+.1f}R")
+                 f"→ {r:+.1f}R (2 lot o'rtachasi)")
 
     # ---- Paper (foydalanuvchi shaxsiy hisobi) ----
     if user_id is not None:

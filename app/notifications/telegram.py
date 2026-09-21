@@ -342,23 +342,45 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
     # Paper lotlar — aniq $
     cash = 0.0
     lot_lines: list[str] = []
+    lot_brief = ""
+    lots_n = len(paper_rows) if paper_rows else 2
     if paper_rows:
-        for i, pos in enumerate(paper_rows, 1):
+        brief: list[str] = []
+        rows_sorted = sorted(
+            paper_rows, key=lambda q: int(getattr(q, "stage", 0) or 0)
+        )
+        for i, pos in enumerate(rows_sorted, 1):
             rr = pos.r_multiple if getattr(pos, "r_multiple", None) is not None else 0.0
             pnl_p = float(getattr(pos, "realized_pnl", 0) or 0)
             cash += pnl_p
             runner = int(getattr(pos, "stage", 0) or 0) >= 10
             nom = "Lot 2 (+4R/+5R)" if runner else "Lot 1 (+3R)"
-            lot_lines.append(
-                f"   {nom}: <b>{rr:+.2f}R</b>  ({pnl_p:+,.2f}$)"
-            )
-        if not lot_lines:
-            lot_lines = [f"   Lot 1: {lot1_txt}", f"   Lot 2: {lot2_txt}"]
+            lot_lines.append(f"   \U0001F4E6 {nom}: <b>{rr:+.2f}R</b>  ({pnl_p:+,.2f}$)")
+            brief.append(f"Lot{i} {rr:+.2f}R ({pnl_p:+,.2f}$)")
+        # HAR IKKALA lot yoziladi; biri hali ochiq bo'lsa ham nomi turadi
+        if len(rows_sorted) < 2:
+            first_runner = (int(getattr(rows_sorted[0], "stage", 0) or 0) >= 10)
+            missing = "Lot 1 (+3R)" if first_runner else "Lot 2 (+4R/+5R)"
+            lot_lines.append(f"   \U0001F4E6 {missing}: hali yopilmagan (ochiq)")
+        if lot_lines:
+            lot_lines.append(f"   \U0001F4B5 Jami: <b>{cash:+,.2f}$</b> (ikkala lot)")
+        lot_brief = ", ".join(brief)
     else:
-        lot_lines = [f"   Lot 1: {lot1_txt}", f"   Lot 2: {lot2_txt}"]
+        lot_lines = [
+            f"   \U0001F4E6 Lot 1: {lot1_txt}",
+            f"   \U0001F4E6 Lot 2: {lot2_txt}",
+        ]
 
-    natija_icon = "🟢 FOYDA" if r > 0.05 else ("🔵 ZARARSIZ" if abs(r) <= 0.05 else "🔴 ZARAR")
-    usd = f"\n💵 Virtual pul: <b>{cash:+,.2f}$</b>" if paper_rows else ""
+    natija_icon = "\U0001F7E2 FOYDA" if r > 0.05 else ( "\U0001F535 ZARARSIZ" if abs(r) <= 0.05 else "\U0001F534 ZARAR")
+    jami_lines = [f"\U0001F3F7 Holat: <b>{natija_icon}</b>"]
+    if paper_rows:
+        jami_lines.append(f"\U0001F4E6 Lotlar: <b>{lots_n}</b>" + (f" \u00B7 {lot_brief}" if lot_brief else ""))
+    else:
+        jami_lines.append(f"\U0001F4E6 Lotlar: <b>2</b> \u00B7 Lot1 {lot1_txt}, Lot2 {lot2_txt}")
+    jami_lines.append(f"\U0001F4CA Jami R: <b>{r:+.2f}R</b>" + (" (2 lot o'rtachasi \u2014 Lot1 + Lot2 puli / umumiy risk)" if lots_n > 1 else " (1 lot)"))
+    if paper_rows:
+        jami_lines.append(f"\U0001F4B5 Jami pul: <b>{cash:+,.2f}$</b>")
+    jami_lines.append(f"\U0001F4C8 Narx bo'yicha: <b>{pnl:+.2f}%</b>")
 
     def row(ok: str, tag: str, label: str, price: float) -> str:
         return f"{ok} <b>{tag}</b> {label}: <b>{fmt_price(price)}</b>"
@@ -377,7 +399,7 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         "📖 <b>QANDAY BO‘LDI</b>",
         *[f"   {s}" for s in story],
         "━━━━━━━━━━━━━━━━",
-        "📦 <b>2 LOT</b> (risk 50/50):",
+        f"\U0001F4E6 <b>{lots_n} LOT</b> (risk 50/50):",
         *lot_lines,
         "━━━━━━━━━━━━━━━━",
         f"📐 <b>R XARITA — qaysi daraja olindi</b>",
@@ -391,9 +413,7 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         row(mark(5), "+5R", "LOT 2 momentum", p5),
         "━━━━━━━━━━━━━━━━",
         "💵 <b>JAMI NATIJA</b>",
-        f"🏷 Holat: <b>{natija_icon}</b>",
-        f"📊 Jami R: <b>{r:+.2f}R</b>   (2 lot o‘rtachasi — pul yuqorida)",
-        f"📈 Narx bo‘yicha: <b>{pnl:+.2f}%</b>{usd}",
+        *jami_lines,
         f"📥 Kirish: <b>{fmt_price(entry)}</b>   🏁 Yopilish: <b>{fmt_price(close)}</b>",
         "━━━━━━━━━━━━━━━━",
         "<i>Paper (virtual) natija — moliyaviy tavsiya emas.</i>",

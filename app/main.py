@@ -228,9 +228,10 @@ class Application:
         self._scheduler_tasks.append(asyncio.create_task(report_loop(), name="reports"))
         self._scheduler_tasks.append(asyncio.create_task(channel_watch(), name="ch-watch"))
         logger.info(
-            "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC, "
-            "muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",
+            "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC "
+            "(%02d:00 Toshkent), muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",
             self.settings.rest_poll_seconds, self.settings.report_time_utc,
+            (int(self.settings.report_time_utc) + 5) % 24,
             self.settings.expiry_sweep_seconds, self.settings.channel_expiry_minutes,
         )
 

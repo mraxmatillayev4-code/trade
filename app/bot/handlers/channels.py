@@ -468,7 +468,7 @@ async def channel_status(message: Message) -> None:
         f"👤 Akkaunt: {'✅ ulangan' if linked else '❌ ulanmagan'}\n"
         f"📡 Telethon: {'✅ ' + str(st.get('account') or '') if st.get('authorized') else '❌ oqimayapti'}\n"
         f"👁 Ko'rilgan xabar: <b>{st.get('seen') or 0}</b>\n"
-        f"⏱ Oxirgi poll: {st.get('last_poll') or '—'}\n"
+        f"⏱ Oxirgi poll: {st.get('last_poll_local') or '—'} (Toshkent)\n"
         f"✅ O'qiladi: {ok}\n"
         f"⚠️ Topilmadi: {fail}\n"
         f"Xato: {st.get('last_error') or '—'}\n"
@@ -481,6 +481,7 @@ async def channel_status(message: Message) -> None:
     )
 
 
+@router.message(F.text == "➕ Qo'shish")
 @router.message(ChannelState.menu, F.text == "➕ Qo'shish")
 async def ask_add(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
@@ -545,6 +546,7 @@ async def do_add(message: Message, state) -> None:
         _spawn(_reload_watcher())
 
 
+@router.message(F.text == "➖ O'chirish")
 @router.message(ChannelState.menu, F.text == "➖ O'chirish")
 async def ask_remove(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
@@ -787,8 +789,13 @@ async def _qr_send(message: Message, link: str, png, target=None):
     return await message.answer(caption, parse_mode="HTML", reply_markup=_qr_kb(link))
 
 
-async def _login_done(message: Message) -> None:
+async def _login_done(message: Message, state=None) -> None:
     """Ulanishdan keyingi umumiy yakun: kuzatuvni qayta ishga tushirib, hisobot."""
+    if state is not None:
+        try:
+            await state.set_state(ChannelState.menu)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AKKAUNT] holat: %s", exc)
     try:
         from app.services.channel_watcher import restart_watcher
         await restart_watcher()
@@ -817,7 +824,7 @@ async def _login_done(message: Message) -> None:
         logger.warning("[AKKAUNT] kanal ro'yxati: %s", exc)
 
 
-async def _qr_loop(message: Message, msg=None) -> None:
+async def _qr_loop(message: Message, msg=None, state=None) -> None:
     """Havolani bitta xabarni TAHRIRLAB yangilab turadi va tasdiqni kutadi."""
     from app.services.channel_user import qr_active, qr_step
     uid = message.from_user.id
@@ -834,7 +841,7 @@ async def _qr_loop(message: Message, msg=None) -> None:
                     await msg.edit_reply_markup(reply_markup=None)
                 except Exception:  # noqa: BLE001
                     pass
-            await _login_done(message)
+            await _login_done(message, state)
             return
         if state_name == "password":
             _login_tmp[uid] = {"step": "qr2fa"}
@@ -870,7 +877,7 @@ async def account_qr(message: Message, state) -> None:
     await state.clear()
     _login_tmp[uid] = {"step": "qr"}
     first = await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
-    await _qr_loop(message, first)
+    await _qr_loop(message, first, state)
 
 
 @router.callback_query(F.data == "qrstop")
@@ -1020,7 +1027,7 @@ async def account_wizard(message: Message, state) -> None:
                 return
             _login_tmp.pop(uid, None)
             await state.clear()
-            await _login_done(message)
+            await _login_done(message, state)
             return
         if step == "qr":
             from app.services.channel_user import qr_cancel
@@ -1056,7 +1063,7 @@ async def account_wizard(message: Message, state) -> None:
                 return
             _login_tmp.pop(uid, None)
             await state.clear()
-            await _login_done(message)
+            await _login_done(message, state)
             return
         if step == "2fa":
             from app.services.channel_user import finish_login, twofa_hint
@@ -1078,7 +1085,7 @@ async def account_wizard(message: Message, state) -> None:
                 return
             _login_tmp.pop(uid, None)
             await state.clear()
-            await _login_done(message)
+            await _login_done(message, state)
             return
     except Exception as exc:  # noqa: BLE001
         logger.exception("[AKKAUNT] %s", exc)
