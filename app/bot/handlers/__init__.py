@@ -5,6 +5,7 @@ from app.bot.handlers import (
     broker,
     channels,
     common,
+    dbadmin,
     market,
     paper,
     reports,
@@ -20,6 +21,7 @@ def get_main_router() -> Router:
     router.include_router(common.router)
     router.include_router(channels.router)
     router.include_router(broker.router)
+    router.include_router(dbadmin.router)
     router.include_router(signals.router)
     router.include_router(market.router)
     router.include_router(strategies.router)

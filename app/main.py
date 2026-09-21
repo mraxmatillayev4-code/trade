@@ -134,6 +134,7 @@ class Application:
                 ("100test", "🧪 Diagnostika"),
                 ("tozalash", "🧹 Hammasini tozalash (noldan)"),
                 ("broker", "🏦 Broker (MT5 demo/real) ulash"),
+                ("db", "💾 /DB - bazani yuklab olish (Supabase/Neon)"),
             ]
             # v72: Chap pastdagi KO'K «Menu» tugmasi QAYTARILDI (foydalanuvchi so'radi).
             # Faqat pastdagi (reply) klaviaturaning ichidagi «☰ Menyu» tugmasi olib
