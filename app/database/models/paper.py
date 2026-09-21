@@ -65,6 +65,8 @@ class PaperPosition(Base):
 
     stage: Mapped[int] = mapped_column(Integer, default=0)  # 0 ochiq, 1 tp1, 2 tp2, 3 yopildi
     sl_moved_to_be: Mapped[bool] = mapped_column(default=False)
+    # Nima uchun yopildi: TP1/TP3/TP5 | SL | VAQT TUGADI | BEKOR
+    close_reason: Mapped[str] = mapped_column(String(24), default="")
 
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -68,14 +68,15 @@ def _ver_info() -> str:
         key = "bor" if getattr(_settings or get_settings(), "ai_api_key", "") else "yo'q"
     except Exception:  # noqa: BLE001
         key = "?"
-    ocr = "?"
+    ocr_ok = False
     try:
         import shutil
         from app.services import channel_ocr as _ocr
-        ocr = getattr(_ocr, "_TESS_EXE", "") or (shutil.which("tesseract") or "topilmadi")
+        ocr_ok = bool(getattr(_ocr, "_TESS_EXE", "") or shutil.which("tesseract"))
     except Exception:  # noqa: BLE001
         pass
-    return f"lokal AI: <b>{lai}</b> | AI kaliti: {key} | tesseract: <code>{_esc(ocr)}</code>"
+    return (f"AI: <b>{lai}</b> | rasm o'qish: {'ok' if ocr_ok else 'yo\'q'}"
+            + (" | kalit: bor" if key == "bor" else ""))
 
 
 async def _diag(key, src: str, kind: str, reason: str = "", sample: str = "") -> None:
@@ -101,13 +102,9 @@ async def _diag(key, src: str, kind: str, reason: str = "", sample: str = "") ->
 
         if not _boot_sent:
             _boot_sent = True
-            await tell_admin(
-                f"\U0001F916 <b>SINO AI {_DIAG_VER} faol</b>\n{_ver_info()}\n"
-                f"Birinchi xabar: <b>{_esc(src)}</b>"
-            )
+            await tell_admin(f"\u2705 <b>SINO AI tayyor</b> | {_ver_info()}")
         if kind == "sig" and not _sig_sent:
             _sig_sent = True
-            await tell_admin(f"\u2705 <b>Birinchi signal o'qildi</b> — {_esc(src)}")
         _na = int(d.get("alerts") or 0)
         if (d["sig"] == 0 and d["read"] >= 12 + 25 * _na
                 and now - float(d.get("ts") or 0) >= 120):
@@ -221,13 +218,14 @@ async def flatten(session, *, symbol: str | None, price: float) -> int:
                         await _paper.apply_fill(
                             session, pos, fill, portion=0.0, is_final=True,
                             exit_price_for_remaining=fill, count_trade=(i == 0),
+                            reason="BEKOR (kanal)",
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("[CH] paper yopish: %s", exc)
             await crud.close_signal(
                 session, old, status=SignalStatus.CANCELLED,
                 result="CANCELLED", r_multiple=0.0, pnl_percent=0.0,
-                close_price=fill,
+                close_price=fill, reason="BEKOR (kanal)",
             )
             n += 1
         except Exception as exc:  # noqa: BLE001
@@ -266,6 +264,7 @@ async def flatten(session, *, symbol: str | None, price: float) -> int:
                     await _paper.apply_fill(
                         session, pos, fill, portion=0.0, is_final=True,
                         exit_price_for_remaining=fill, count_trade=False,
+                        reason="BEKOR (kanal)",
                     )
                     n += 1
                 except Exception as exc:  # noqa: BLE001
@@ -570,9 +569,25 @@ async def _ensure_schema(session, force: bool = False) -> str:
             models.append(SystemLog)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            from app.database.models.paper import PaperAccount, PaperPosition
+            models.append(PaperAccount)
+            models.append(PaperPosition)
+        except Exception:  # noqa: BLE001
+            pass
 
-        def _work(sync_conn):
-            insp = inspect(sync_conn)
+        def _work(target):
+            # AsyncSession.run_sync -> Session beradi; session.connection() -> Connection.
+            # Ikkalasi bilan ham ishlashi kerak (v46 da Session uzatilardi va
+            # inspect() xato berardi — shu sababli ustunlar qo'shilmasdi).
+            conn = target
+            if not hasattr(conn, "dialect"):
+                try:
+                    conn = conn.connection()
+                except Exception:  # noqa: BLE001
+                    conn = getattr(conn, "bind", None) or conn
+            insp = inspect(conn)
+            sync_conn = conn
             names = set(insp.get_table_names())
             for model in models:
                 t = model.__table__
@@ -601,7 +616,12 @@ async def _ensure_schema(session, force: bool = False) -> str:
             dialect = ""
         if dialect and dialect not in ("postgresql", "sqlite"):
             return ""
-        await session.run_sync(_work)
+        try:
+            conn = await session.connection()
+            await conn.run_sync(_work)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CH-SCHEMA] connection yo'li: %s — session yo'li bilan urinib ko'ramiz", exc)
+            await session.run_sync(_work)
         if added:
             logger.warning("[CH-SCHEMA] yetishmayotgan ustunlar qo'shildi: %s",
                            ", ".join(added))
@@ -687,6 +707,37 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
         risk = abs(levels_entry - levels_sl) or (levels_entry * 0.008)
         entry_low, entry_high = levels_entry - risk * 0.1, levels_entry + risk * 0.1
 
+    # ---- v50: kanal O'ZI yozgan TP darajalari bo'lsa — o'shalar ishlatiladi ----
+    ch_tps: list = []
+    if getattr(settings, "channel_use_post_tp", True):
+        _raw_tps: list = []
+        try:
+            _raw_tps = [float(x) for x in (getattr(parsed, "tps", None) or []) if x]
+        except Exception:  # noqa: BLE001
+            _raw_tps = []
+        if not _raw_tps and getattr(parsed, "tp", None):
+            try:
+                _raw_tps = [float(parsed.tp)]
+            except Exception:  # noqa: BLE001
+                _raw_tps = []
+        _buy = direction == Direction.BUY
+        _ok = [t for t in _raw_tps
+               if (_buy and t > float(levels_entry)) or ((not _buy) and t < float(levels_entry))]
+        ch_tps = sorted(_ok, reverse=not _buy)[:3]
+    if ch_tps:
+        _risk = abs(float(levels_entry) - float(levels_sl)) or float(levels_entry) * 0.004
+        tp1 = float(ch_tps[0])
+        tp2 = float(ch_tps[1]) if len(ch_tps) > 1 else r_price(
+            direction, float(levels_entry), float(levels_sl), 2)
+        tp3 = float(ch_tps[2]) if len(ch_tps) > 2 else r_price(
+            direction, float(levels_entry), float(levels_sl), 3)
+        if abs(float(levels_entry) - float(tp1)) < _risk * 0.3:
+            tp1 = r_price(direction, float(levels_entry), float(levels_sl), 1)
+            tp2 = r_price(direction, float(levels_entry), float(levels_sl), 2)
+            tp3 = r_price(direction, float(levels_entry), float(levels_sl), 3)
+        else:
+            logger.info("[CH] TP kanal postidan: %s / %s / %s", tp1, tp2, tp3)
+
     await _park_unique(
         session, symbol=symbol, timeframe=timeframe, direction=direction.value,
     )
@@ -698,9 +749,12 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
         {"label": "AI xabarni o'qidi (matn/rasm)", "passed": True, "source": "channel"},
     ]
     snippet = _esc((parsed.raw or "")[:180])
+    _tp_src = "kanal posti" if ch_tps else "R asosida (avto)"
     explanation = (
         f"<b>📡 Kanal:</b> {_esc(src)}\n"
         f"{parsed.direction} {symbol} {timeframe}\n"
+        f"TP manbasi: {_tp_src}\n"
+        f"Muddat: {int(getattr(settings, 'channel_expiry_minutes', 240))} daqiqa\n"
         f"<code>{snippet}</code>"
     )
     total = 0

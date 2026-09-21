@@ -1,6 +1,10 @@
 """
 Konveyer: yopilgan sham → ochiq KANAL signallarini kuzatish (zarar −1R / foyda +3R).
 Bot o'zi bozordan signal qidirmaydi.
+
+v50: signal FAQAT o'z timeframe'ining shamlari bilan boshqariladi.
+     Kanal signallari 1m (M1) — shuning uchun 1m shamlar asosiy.
+     (Ilgari 4h sham ham 1m signalni yopib qo'yardi — bu xato edi.)
 """
 from __future__ import annotations
 
@@ -78,5 +82,15 @@ class AnalysisPipeline:
                         by_id[s.id] = s
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[PIPELINE] paper signal: %s", exc)
+            tracked = 0
             for sig in by_id.values():
+                sig_tf = str(getattr(sig, "timeframe", "") or "").lower()
+                is_channel = (getattr(sig, "quality_mode", "") or "").upper() == "CHANNEL"
+                if sig_tf and sig_tf != timeframe:
+                    # kanal M1 signali: 1m sham yo'q bo'lsa — boshqa TF bilan ham boshqariladi
+                    if not (is_channel and timeframe == "1m"):
+                        continue
                 await self._tracker.update_for_candle(session, sig, df, self._notifier)
+                tracked += 1
+            if tracked and timeframe == "1m":
+                logger.debug("[PIPELINE] %s %s: %d signal boshqarildi", symbol, timeframe, tracked)

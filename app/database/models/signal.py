@@ -74,6 +74,7 @@ class Signal(Base):
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

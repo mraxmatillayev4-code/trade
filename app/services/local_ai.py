@@ -1,4 +1,4 @@
-"""SINO Local AI (LAI v46) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
+"""SINO Local AI (LAI v50) — kalitsiz, internetsiz ishlaydigan signal o'quvchi dvigatel.
 
 Nima qiladi (hammasi mahalliy, API key kerak emas):
   1) Normalizatsiya: o'zbek/rus/ingliz/arab yozuvi, emoji, OCR xatolari (0<->O, 1<->l, 5<->S ...)
@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-46"
+__version__ = "SINO-LAI-50"
 
 import difflib
 import re
@@ -646,6 +646,8 @@ _V_HIT = re.compile(
     r"closed?\s*(in|at)\s*(profit|loss)|foyda\s*oldik|zarar\s*bo[`']?ldi|"
     r"take\s*profit\s*(hit|done)|target\s*(reached|hit)|bajarildi|olds?\s*✅|"
     r"successfully|running\s*profit|all\s*tp\s*done|enjoy\s*\d|\btp\s*\d?\s*(oldi|oldik|done)\b|"
+    r"target\s*\d?\s*complete|\bcomplete(d)?\b|\b1/1\b|"
+    r"\bnafsizga\b|\bfoyda\b|\braketa\b|\bshedevr\b|"
     r"signal\s*yopildi|yopildi|итог|результат|профит\s*\+)", re.I)
 # 2-daraja: pip/foyda hisobi — reja (entry+SL) bo'lsa signal bo'lishi mumkin
 _V_RESULT = re.compile(
@@ -676,6 +678,11 @@ _V_ANALYSIS = re.compile(
 _SOFT_COMMENT = re.compile(
     r"\b(boladi|kere|kerak|qilsak|qziqsak|qzsak|fokus|fokusda|oqad|oqadi|oqib|oqdi|"
     r"boshladik|boslaymiz|boshlimiz|kotamiz|kutamiz|kuzatamiz)\b", re.I)
+
+_AKTIV_RE = re.compile(r"\b(aktiv|active|faol|kuchda|aktivda)\b", re.I)
+_IDEA_RE = re.compile(r"\b(idea|tahlil|signal|setup|proyekt|fikr)\b", re.I)
+_DIR_WORD_RE = re.compile(r"\b(buy|sell|sel|long|short)\b", re.I)
+_NOW_RE = re.compile(r"\b(now|hozir|hozirda|bozordan|market)\b", re.I)
 
 _V_WARN = re.compile(
     r"\b(fake|feyk|aldan|aldanib|zagon|pul\s*ko\s*paytir|kopaytirib\s*ber|"
@@ -827,10 +834,14 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
         # narx ankeri bo'yicha aktiv (masalan, 4360 -> oltin)
         if _GOLDISH[0] <= float(ref) <= _GOLDISH[1]:
             symbol = "XAUUSDT"
-    if symbol is None and hint_sym:
+    if (symbol is None and direction and hint_sym
+            and (levels_raw["free"] or levels_raw["entry"] or levels_raw["sl"])):
         # kanalning oxirgi juftligi (qisqa yozuvlar: "57-61 buy otkat")
-        if direction and (levels_raw["free"] or levels_raw["entry"] or levels_raw["sl"]):
-            symbol = hint_sym
+        symbol = hint_sym
+    if (symbol is None and direction and _DIR_WORD_RE.search(body)
+            and (_AKTIV_RE.search(body) or _NOW_RE.search(body))):
+        # "Faqat SEL AKTIV", "buy now" — juftlik yozilmagan, oltin kanallari
+        symbol = "XAUUSDT"
     if symbol is None:
         return None, "juftlik/aktiv ko'rinmadi", False
 
@@ -879,6 +890,11 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
 
     # ishonch: kuchli cue, yoki level bilan medium cue, yoki bir necha kuchsiz cue
     ok = bool(strong) or (score >= 2.0 and has_levels) or score >= 4.0
+    _exempt = bool(_IDEA_RE.search(body)) or (
+        bool(_DIR_WORD_RE.search(body)) and (_AKTIV_RE.search(body) or _NOW_RE.search(body)))
+    if ok and not has_levels and not has_image and not _exempt:
+        # "BUY ZONES", "Men bir buy berme ekanda" kabi shovqin — darajasiz signal emas
+        return None, "yo'nalish bor, daraja/now yo'q (izoh)", False
     if not ok and score >= 1.5 and entry and (sl or tps):
         ok = True
     if not ok and has_image and has_levels and len(body) <= 80:

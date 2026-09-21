@@ -1,8 +1,13 @@
 """2 lot: Lot1 +3R da yopiladi, Lot2 +4R (momentum bo'lsa +5R).
 
 Zarar −1R (ikkala lot). Admin aytmasa ham bozor kuzatiladi.
+v50: + har bir yopilishda SABAB yoziladi (TP1/TP3/TP5/SL/VAQT TUGADI/BEKOR)
+     + muddat tugasa (kanal M1: 4 soat) pozitsiya bozor narxida yopiladi va
+       natija kartasi yuboriladi — signal abadiy ochiq qolmaydi.
 """
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 import pandas as pd
 from sqlalchemy import select
@@ -18,6 +23,13 @@ from app.engine.risk import format_price, r_price
 from app.paper_trading.engine import PaperEngine
 
 logger = get_logger(__name__)
+
+
+_REASON_BY_STATUS = {
+    "SL_HIT": "SL", "TP1_HIT": "BE (himoya)", "TP2_HIT": "TP2",
+    "TP3_HIT": "TP3", "TP4_HIT": "TP4", "TP5_HIT": "TP5",
+    "EXPIRED": "VAQT TUGADI", "CANCELLED": "BEKOR",
+}
 
 
 def classify_result(r: float) -> str:
@@ -57,11 +69,113 @@ class SignalTracker:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Tracker xatosi signal #%s: %s", signal.id, exc)
 
-    async def _fill(self, session, pos, price: float, *, count_trade: bool = True) -> None:
+    async def _fill(self, session, pos, price: float, *,
+                    count_trade: bool = True, reason: str = "") -> None:
         await self._paper.apply_fill(
             session, pos, price, portion=0.0, is_final=True,
-            exit_price_for_remaining=price, count_trade=count_trade,
+            exit_price_for_remaining=price, count_trade=count_trade, reason=reason,
         )
+
+    # ---------- Muddat (M1 signallar abadiy ochiq qolmasin) ----------
+    def expiry_minutes(self, signal) -> int:
+        try:
+            return int(self._settings.expiry_minutes_for(
+                str(signal.timeframe or "1m"),
+                str(getattr(signal, "quality_mode", "") or ""),
+            ))
+        except Exception:  # noqa: BLE001
+            return 240
+
+    async def expire_signal(self, session: AsyncSession, signal: Signal,
+                            price: float, notifier=None) -> bool:
+        """Muddati tugagan signalni bozor narxida yopadi + natija kartasi."""
+        try:
+            positions = await self._paper.open_positions(session, signal_id=signal.id)
+            for i, p in enumerate(positions):
+                try:
+                    await self._fill(session, p, price, count_trade=(i == 0),
+                                     reason="VAQT TUGADI")
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[TRACKER] expiry fill: %s", exc)
+            stats = await self._paper.signal_pnl(session, signal.id, mark_price=price)
+            r = float(stats.get("r_avg") or 0.0)
+            # muddat bo'yicha kichik natija "g'alaba" deb hisoblanmaydi (halol statistika)
+            if abs(r) < 0.5:
+                r = round(r, 3)
+            signal.status = SignalStatus.EXPIRED.value
+            await session.commit()
+            if notifier:
+                no = f"№{signal.signal_no} " if getattr(signal, "signal_no", None) else ""
+                await notifier.send_event(
+                    f"\u23F3 <b>{no}{signal.symbol}</b> — <b>muddat tugadi</b> "
+                    f"({self.expiry_minutes(signal)} daqiqa). Yopilish: {format_price(price)} · "
+                    f"{r:+.2f}R · {stats.get('total_pnl', 0.0):+,.2f}$"
+                )
+            if abs(r) < 0.5:
+                signal.status = SignalStatus.EXPIRED.value
+                await session.commit()
+                await crud.close_signal(
+                    session, signal, status=SignalStatus.EXPIRED,
+                    result="BREAKEVEN", r_multiple=r,
+                    pnl_percent=0.0, close_price=price, reason="VAQT TUGADI",
+                )
+                if notifier:
+                    try:
+                        await session.refresh(signal)
+                        await notifier.send_result(signal)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[TRACKER] muddat kartasi: %s", exc)
+                logger.info("[TRACKER] #%s muddat tugadi (zararsiz) R=%.2f", signal.id, r)
+                return True
+            await self._finish_signal(
+                session, signal, notifier, exit_price=price, r_hint=r,
+                reason="VAQT TUGADI",
+            )
+            logger.info("[TRACKER] #%s muddat tugadi → yopildi R=%.2f", signal.id, r)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[TRACKER] expiry xatosi #%s: %s", getattr(signal, "id", "?"), exc)
+            return False
+
+    async def sweep_expired(self, session: AsyncSession, symbol: str | None = None,
+                            notifier=None, price_lookup=None) -> int:
+        """Muddati o'tgan barcha ochiq signallarni yopadi (soat mexanizmi)."""
+        from app.database import crud
+        closed = 0
+        try:
+            syms = [symbol] if symbol else None
+            opens = []
+            if syms:
+                opens = await crud.get_active_signals(session, syms[0])
+            else:
+                opens = list((await session.execute(
+                    select(Signal).where(Signal.is_active.is_(True))
+                )).scalars().all())
+            now = datetime.now(timezone.utc)
+            for sig in opens:
+                created = sig.created_at
+                if created is None:
+                    continue
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age = (now - created).total_seconds() / 60.0
+                if age < self.expiry_minutes(sig):
+                    continue
+                price = None
+                if price_lookup is not None:
+                    try:
+                        price = await price_lookup(sig.symbol)
+                    except Exception:  # noqa: BLE001
+                        price = None
+                if not price:
+                    price = float(sig.close_price or sig.entry or 0.0) or None
+                if not price:
+                    continue
+                if await self.expire_signal(session, sig, float(price), notifier):
+                    closed += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[TRACKER] sweep xatosi: %s", exc)
+        return closed
 
     async def _process(self, session: AsyncSession, signal: Signal,
                        df: pd.DataFrame, notifier) -> None:
@@ -72,6 +186,17 @@ class SignalTracker:
         low = float(last["low"])
         buy = str(signal.direction).upper() == "BUY"
         positions = await self._paper.open_positions(session, signal_id=signal.id)
+
+        # 0) MUDDAT: kanal M1 signali belgilangan daqiqadan keyin yopiladi
+        created = getattr(signal, "created_at", None)
+        if created is not None:
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age_min = (datetime.now(timezone.utc) - created).total_seconds() / 60.0
+            if age_min >= self.expiry_minutes(signal):
+                await self.expire_signal(session, signal, float(last["close"]), notifier)
+                return
+
         if not positions:
             if signal.is_active:
                 # paper yo'q — signalni ham yopamiz emas, kutyapmiz
@@ -95,7 +220,8 @@ class SignalTracker:
             sl = float(p.sl or signal.sl)
             if hit_below(sl):
                 try:
-                    await self._fill(session, p, sl, count_trade=not counted)
+                    await self._fill(session, p, sl, count_trade=not counted,
+                                     reason=("BE" if getattr(p, "sl_moved_to_be", False) else "SL"))
                     counted = True
                     sl_closed.append(p)
                 except Exception as exc:  # noqa: BLE001
@@ -149,7 +275,8 @@ class SignalTracker:
         if lot1 and hit_above(float(signal.tp3)):
             for i, p in enumerate(lot1):
                 try:
-                    await self._fill(session, p, float(signal.tp3), count_trade=(i == 0))
+                    await self._fill(session, p, float(signal.tp3), count_trade=(i == 0),
+                                     reason="TP3")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot1 3R: %s", exc)
             signal.status = SignalStatus.TP3_HIT.value
@@ -184,8 +311,9 @@ class SignalTracker:
 
         if hit5:
             for i, p in enumerate(lot2):
+                # Lot2 uchun bitim QAYTA sanalmaydi — Lot1 yopilganda sanalgan
                 try:
-                    await self._fill(session, p, tp5, count_trade=(i == 0))
+                    await self._fill(session, p, tp5, count_trade=False, reason="TP5")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot2 5R: %s", exc)
             signal.status = SignalStatus.TP5_HIT.value
@@ -215,7 +343,7 @@ class SignalTracker:
                 return
             for i, p in enumerate(lot2):
                 try:
-                    await self._fill(session, p, tp4, count_trade=(i == 0))
+                    await self._fill(session, p, tp4, count_trade=False, reason="TP4")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot2 4R: %s", exc)
             signal.status = SignalStatus.TP4_HIT.value
@@ -228,7 +356,8 @@ class SignalTracker:
             return
 
     async def _finish_signal(self, session, signal, notifier, *,
-                             exit_price: float, r_hint: float | None = None) -> None:
+                             exit_price: float, r_hint: float | None = None,
+                             reason: str = "") -> None:
         left = await self._paper.open_positions(session, signal_id=signal.id)
         if left:
             return
@@ -237,7 +366,8 @@ class SignalTracker:
         r = r_hint
         if r is None:
             st = str(signal.status or "")
-            r = {"TP5_HIT": 4.0, "TP4_HIT": 3.5, "TP3_HIT": 3.0, "SL_HIT": -1.0}.get(st, 0.0)
+            r = {"TP5_HIT": 4.0, "TP4_HIT": 3.5, "TP3_HIT": 3.0, "SL_HIT": -1.0,
+                 "EXPIRED": 0.0}.get(st, 0.0)
         result = classify_result(r)
         try:
             status = SignalStatus(signal.status)
@@ -253,6 +383,7 @@ class SignalTracker:
         await crud.close_signal(
             session, signal, status=status, result=result,
             r_multiple=r, pnl_percent=pnl_pct, close_price=exit_price,
+            reason=(reason or _REASON_BY_STATUS.get(str(signal.status or ""), "")),
         )
         await self._update_strategy_stats(session, signal, r)
         if notifier:
@@ -304,12 +435,14 @@ class SignalTracker:
                 continue
             for i, pos in enumerate(await self._paper.open_positions(session, signal_id=opp.id)):
                 try:
-                    await self._fill(session, pos, close_price, count_trade=(i == 0))
+                    await self._fill(session, pos, close_price, count_trade=(i == 0),
+                                     reason="BEKOR (yangi signal)")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] flip: %s", exc)
             await crud.close_signal(
                 session, opp, status=SignalStatus.CANCELLED,
                 result="CANCELLED", r_multiple=0.0,
                 pnl_percent=0.0, close_price=close_price,
+                reason="BEKOR (yangi signal)",
             )
             logger.info("[TRACKER] #%s yopildi (yangi signal)", opp.id)

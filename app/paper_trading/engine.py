@@ -131,7 +131,7 @@ class PaperEngine:
     async def apply_fill(self, session: AsyncSession, pos: PaperPosition,
                          fill_price: float, portion: float, is_final: bool,
                          exit_price_for_remaining: float | None = None,
-                         count_trade: bool = True) -> float:
+                         count_trade: bool = True, reason: str = "") -> float:
         acc = await self.get_account(session, pos.user_id)
         pnl = 0.0
 
@@ -160,6 +160,11 @@ class PaperEngine:
             pos.close_price = exit_price_for_remaining or fill_price
             pos.closed_at = datetime.now(timezone.utc)
             pos.balance_after = acc.balance
+            if reason:
+                try:
+                    pos.close_reason = str(reason)[:24]
+                except Exception:  # noqa: BLE001
+                    pass
             if pos.risk_amount > 0:
                 pos.r_multiple = round(pos.realized_pnl / pos.risk_amount, 3)
 
@@ -182,6 +187,54 @@ class PaperEngine:
 
         await session.commit()
         return pnl
+
+    # ---------- Hisob xulosasi (karta va hisobotlar uchun) ----------
+    async def account_summary(self, session: AsyncSession, user_id: int) -> dict:
+        """Balans, jami foyda/zarar, g'alaba %, ochiq bitimlar soni."""
+        acc = await self.get_account(session, user_id)
+        opens = await self.open_positions(session, user_id=user_id)
+        pnl = float(acc.balance or 0) - float(acc.initial_balance or 0)
+        pct = (pnl / float(acc.initial_balance) * 100.0) if acc.initial_balance else 0.0
+        trades = int(acc.total_trades or 0)
+        wins = int(acc.total_wins or 0)
+        return {
+            "balance": float(acc.balance or 0),
+            "initial": float(acc.initial_balance or 0),
+            "pnl": pnl, "pnl_pct": pct,
+            "trades": trades, "wins": wins,
+            "winrate": (wins / trades * 100.0) if trades else 0.0,
+            "open_count": len(opens),
+            "consecutive_losses": int(acc.consecutive_losses or 0),
+            "paused": bool(acc.paused_by_circuit),
+            "auto_trade": bool(acc.auto_trade_enabled),
+        }
+
+    async def signal_pnl(self, session: AsyncSession, signal_id: int,
+                         mark_price: float | None = None) -> dict:
+        """Bitta signal bo'yicha: lotlar, ochiq/yopiq, jami $ va o'rtacha R.
+        mark_price berilsa — ochiq lotlar shu narxda baholanadi."""
+        rows = list((await session.execute(
+            select(PaperPosition).where(PaperPosition.signal_id == signal_id)
+        )).scalars().all())
+        realized = 0.0
+        unreal = 0.0
+        risk_total = 0.0
+        open_qty = 0.0
+        for pos in rows:
+            realized += float(pos.realized_pnl or 0.0)
+            risk_total += float(pos.risk_amount or 0.0)
+            if str(pos.status) == PaperStatus.OPEN.value and pos.qty_remaining > 0:
+                open_qty += float(pos.qty_remaining)
+                if mark_price is not None:
+                    d = 1.0 if pos.direction == Direction.BUY.value else -1.0
+                    unreal += (float(mark_price) - float(pos.entry)) * d * float(pos.qty_remaining)
+        total = realized + unreal
+        r_avg = (total / risk_total) if risk_total > 0 else 0.0
+        return {
+            "lots": len(rows), "realized": realized, "unrealized": unreal,
+            "total_pnl": total, "r_avg": r_avg, "open_qty": open_qty,
+            "risk_total": risk_total,
+        }
 
     # ---------- Boshqaruv ----------
     async def set_balance(self, session: AsyncSession, user_id: int,

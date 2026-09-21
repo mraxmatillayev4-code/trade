@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timezone
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
@@ -83,6 +84,65 @@ def _source_line(signal: Signal) -> str:
     return "📡 <b>Manba:</b> signal kanali"
 
 
+def _expiry_text(signal: Signal) -> str:
+    """'4 soat' / '36 daqiqa' — signal qancha vaqt amal qiladi."""
+    try:
+        from app.core.config import get_settings
+        mins = int(get_settings().expiry_minutes_for(
+            str(signal.timeframe or "1m"),
+            str(getattr(signal, "quality_mode", "") or ""),
+        ))
+    except Exception:  # noqa: BLE001
+        mins = 240
+    if mins % 60 == 0 and mins >= 60:
+        return f"{mins // 60} soat"
+    return f"{mins} daqiqa"
+
+
+def _duration_text(start, end) -> str:
+    try:
+        if start is None or end is None:
+            return "—"
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        sec = max(0, int((end - start).total_seconds()))
+    except Exception:  # noqa: BLE001
+        return "—"
+    if sec < 3600:
+        return f"{sec // 60} daqiqa"
+    h, m = divmod(sec // 60, 60)
+    return f"{h} soat {m} daqiqa" if m else f"{h} soat"
+
+
+_REASON_WORDS = {
+    "SL": "STOP LOSS (−1R)",
+    "BE": "STOP (himoya — kirishda)",
+    "TP1": "TP1 (+1R himoya)",
+    "TP2": "TP2",
+    "TP3": "TP3 (Lot 1 yopildi)",
+    "TP4": "TP4 (Lot 2 yopildi)",
+    "TP5": "TP5 (Lot 2 momentum)",
+    "VAQT TUGADI": "VAQT TUGADI (muddat tugadi)",
+    "BEKOR": "BEKOR QILINDI",
+    "BREAKEVEN": "ZARARSIZ (breakeven)",
+}
+
+
+def _reason_text(signal: Signal) -> str:
+    raw = str(getattr(signal, "close_reason", "") or "").strip()
+    if raw:
+        return _REASON_WORDS.get(raw.upper(), raw)
+    st = str(getattr(signal, "status", "") or "").upper()
+    st_map = {
+        "SL_HIT": "SL", "TP1_HIT": "TP1", "TP2_HIT": "TP2",
+        "TP3_HIT": "TP3", "TP4_HIT": "TP4", "TP5_HIT": "TP5",
+        "EXPIRED": "VAQT TUGADI", "CANCELLED": "BEKOR",
+    }
+    return _REASON_WORDS.get(st_map.get(st, ""), "—")
+
+
 def format_signal_short(signal: Signal) -> str:
     """QISQA signal kartasi — kirish, stop, 1R/2R/3R narxlari, ehtimollik."""
     is_buy = signal.direction == "BUY"
@@ -106,6 +166,8 @@ def format_signal_short(signal: Signal) -> str:
         f"📊 Kuch: {signal.score:.1f}/10  |  2 lot"
         f"{extra}\n"
         f"<i>Avto-trade: Lot1 +3R, Lot2 +4R/+5R. Zarar −1R.</i>\n"
+        f"<i>⏳ Amal muddati: {_expiry_text(signal)} — shundan keyin bozor narxida yopiladi.</i>\n"
+        f"<i>📣 Natija (WIN/LOSE) kartasi TP yoki SL urilganda avtomatik keladi.</i>\n"
         f"<i>Tafsilot: «❓ Nega bu signal?»</i>"
     )
 
@@ -211,8 +273,31 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
             return "🛑"
         return "➖"
 
+    # Paper lotlar bo'lsa — hikoya HAQIQIY R bilan yoziladi (kanal TP si 3R dan
+    # yaqin yoki uzoq bo'lishi mumkin, shuning uchun quruq '+3R' yozilmaydi).
+    lot_r: dict[str, float] = {}
+    if paper_rows:
+        for pos in paper_rows:
+            key = "lot2" if int(getattr(pos, "stage", 0) or 0) >= 10 else "lot1"
+            lot_r[key] = float(getattr(pos, "r_multiple", 0.0) or 0.0)
+
     story: list[str] = []
-    if sl_hit and hit <= 0:
+    if paper_rows and lot_r:
+        r2 = lot_r.get("lot2")
+        r1 = lot_r.get("lot1")
+        if sl_hit and hit <= 0:
+            story.append(f"Narx <b>stop</b> ga urildi — ikkala lot ham "
+                         f"<b>{r1:+.2f}R</b> / <b>{r2:+.2f}R</b> bilan yopildi.")
+        elif st == "EXPIRED":
+            story.append(f"⏳ Muddat tugadi — pozitsiya <b>bozor narxida</b> yopildi.")
+        else:
+            story.append(f"Lot 1 <b>{r1:+.2f}R</b> da yopildi"
+                         f" ({str(getattr(paper_rows[0], 'close_reason', '') or 'TP')}).")
+            if r2 is not None:
+                story.append(f"Lot 2 <b>{r2:+.2f}R</b> da yopildi"
+                             f" ({str(getattr(paper_rows[-1], 'close_reason', '') or 'TP')}).")
+        lot1_txt, lot2_txt = f"{r1:+.2f}R", (f"{r2:+.2f}R" if r2 is not None else "—")
+    elif sl_hit and hit <= 0:
         story.append("Narx <b>stop (−1R)</b> ga urildi. Ikkala lot zarar bilan yopildi.")
         story.append("+1R himoyaga yetilmadi.")
         lot1_txt, lot2_txt = "−1R (stop)", "−1R (stop)"
@@ -232,6 +317,9 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         story.append("Lot 1 <b>+3R</b> da yopildi.")
         story.append("Lot 2 +4R/+5R ga yetmay yopildi yoki qolmadi.")
         lot1_txt, lot2_txt = "+3R yopildi", "chala / yopildi"
+    elif st == "EXPIRED":
+        story.append(f"⏳ Muddat tugadi — pozitsiya <b>bozor narxida</b> yopildi ({r:+.2f}R).")
+        lot1_txt, lot2_txt = f"{r:+.2f}R (muddat)", f"{r:+.2f}R (muddat)"
     elif be:
         story.append("Foyda va zarar deyarli teng — <b>zararsiz</b> yopildi.")
         lot1_txt, lot2_txt = "0R", "0R"
@@ -269,6 +357,9 @@ def format_result(signal: Signal, paper_rows: list | None = None) -> str:
         f"💰 <b>{pair}</b>  •  ⏱ {str(signal.timeframe or '').upper()}  •  "
         f"{'🟢 BUY' if d == 'BUY' else '🔴 SELL'}",
         f"🕐 Berilgan: {format_tashkent(signal.created_at)}",
+        f"🏁 Yopilgan: {format_tashkent(signal.closed_at) if getattr(signal, 'closed_at', None) else '—'}",
+        f"⏳ Davomiylik: {_duration_text(getattr(signal, 'created_at', None), getattr(signal, 'closed_at', None))}",
+        f"📌 Sabab: <b>{_reason_text(signal)}</b>",
         _source_line(signal),
         "━━━━━━━━━━━━━━━━",
         "📖 <b>QANDAY BO‘LDI</b>",
@@ -400,7 +491,24 @@ class TelegramNotifier:
                 rows = list((await session.execute(stmt)).scalars().all())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[NOTIFY] paper natija: %s", exc)
-        await self._send(format_result(signal, rows), reply_markup=collapse_kb())
+        text = format_result(signal, rows)
+        try:
+            ids = list(self._settings.admin_id_list)
+            if ids and rows:
+                from app.paper_trading.engine import PaperEngine
+                async with _session() as _s:
+                    acc = await PaperEngine().account_summary(_s, rows[0].user_id)
+                icon = "🟢" if acc["pnl"] >= 0 else "🔴"
+                text += (
+                    "\n🏦 <b>Virtual hisob:</b> "
+                    f"<b>${acc['balance']:,.2f}</b>  "
+                    f"{icon} {acc['pnl']:+,.2f}$ ({acc['pnl_pct']:+.1f}%)\n"
+                    f"📊 Bitimlar: {acc['trades']} | G'alaba: {acc['winrate']:.0f}% | "
+                    f"Ochiq: {acc['open_count']}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[NOTIFY] hisob qatori: %s", exc)
+        await self._send(text, reply_markup=collapse_kb())
 
     async def send_event(self, text: str) -> None:
         await self._send(text)

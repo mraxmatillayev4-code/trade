@@ -26,7 +26,7 @@ from app.database.session import async_session_factory, init_db
 from app.market.binance_rest import BinanceRest
 from app.market.binance_ws import BinanceWebSocket
 from app.market.candle_manager import CandleManager
-from app.market.gold_rest import GoldRest
+from app.market.gold_rest import GoldRest, needs_mexc
 from app.notifications.telegram import TelegramNotifier
 from app.paper_trading.engine import PaperEngine
 from app.services.pipeline import AnalysisPipeline
@@ -79,6 +79,16 @@ class Application:
                 logger.info("[AI-WEB] internet xotirasi tayyor")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AI-WEB] xotira: %s", exc)
+        # v50: yangi ustunlar (signals.close_reason, paper_positions.close_reason)
+        # eski bazada ham bo'lishi shart — aks holda har bir yozuv xato beradi.
+        try:
+            from app.services.channel_inbox import _ensure_schema
+            async with async_session_factory() as session:
+                added = await _ensure_schema(session, force=True)
+            if added:
+                logger.warning("[DB] yetishmagan ustunlar qo'shildi: %s", added)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DB] sxema tekshiruvi: %s", exc)
         await self.cache.connect()
         try:
             from app.core.access import hydrate_admins
@@ -104,11 +114,34 @@ class Application:
                     BotCommand(command="start", description="🚀 Botni ishga tushirish / menyu"),
                     BotCommand(command="menu", description="☰ Pastki menyuni ochish"),
                     BotCommand(command="akkaunt", description="👤 Telegram akkaunt ulash"),
+                    BotCommand(command="natija", description="📋 Oxirgi WIN/LOSE natijalar"),
+                    BotCommand(command="hisob", description="💼 Virtual (paper) hisob"),
+                    BotCommand(command="100stat", description="📊 Kanal signallari statistikasi"),
+                    BotCommand(command="100fayl", description="📄 Kanallar bazasi (txt)"),
                 ])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Bot komandalari o'rnatilmadi: %s", exc)
         else:
             logger.warning("BOT_TOKEN yo'q — Telegram bot ishlamaydi (faqat API)")
+
+    # ---------- Narx (muddat yopilishi uchun) ----------
+    async def price_for(self, symbol: str) -> float | None:
+        """Oxirgi narx: avval 1m shamdan, bo'lmasa birjadan."""
+        try:
+            df = self.candles.get_df(symbol, "1m", include_open=True)
+            if df is not None and len(df):
+                px = float(df.iloc[-1]["close"])
+                if px > 0:
+                    return px
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if needs_mexc(symbol):
+                return await self.gold.get_last_price(symbol)
+            return await self.rest.get_last_price(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[PX] %s narx olinmadi: %s", symbol, exc)
+            return None
 
     # ---------- Scheduler ----------
     def start_scheduler(self) -> None:
@@ -169,11 +202,37 @@ class Application:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[CH-WATCH] start: %s", exc)
 
+        async def expiry_loop() -> None:
+            """v50: muddati tugagan signallarni yopish (M1 — 4 soat).
+
+            Kanal M1 signallari abadiy ochiq qolmasin: TP ham, SL ham urilmasa
+            belgilangan daqiqadan keyin bozor narxida yopiladi va WIN/LOSE
+            kartasi yuboriladi.
+            """
+            await asyncio.sleep(25)
+            while True:
+                try:
+                    async with async_session_factory() as session:
+                        n = await self.tracker.sweep_expired(
+                            session, notifier=self.notifier,
+                            price_lookup=self.price_for,
+                        )
+                    if n:
+                        logger.info("[TRACKER] muddati tugagan %d signal yopildi", n)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[TRACKER] expiry loop: %s", exc)
+                await asyncio.sleep(max(60, int(self.settings.expiry_sweep_seconds)))
+
         self._scheduler_tasks.append(asyncio.create_task(poll_loop(), name="rest-poller"))
+        self._scheduler_tasks.append(asyncio.create_task(expiry_loop(), name="expiry-sweep"))
         self._scheduler_tasks.append(asyncio.create_task(report_loop(), name="reports"))
         self._scheduler_tasks.append(asyncio.create_task(channel_watch(), name="ch-watch"))
-        logger.info("Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC",
-                    self.settings.rest_poll_seconds, self.settings.report_time_utc)
+        logger.info(
+            "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC, "
+            "muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",
+            self.settings.rest_poll_seconds, self.settings.report_time_utc,
+            self.settings.expiry_sweep_seconds, self.settings.channel_expiry_minutes,
+        )
 
     def start_websocket(self) -> None:
         if not self.settings.ws_enabled:

@@ -28,6 +28,36 @@ class _AwaitingBalance(Filter):
         return bool(u and u.id in _pending_balance)
 
 
+_REASON_WORDS = {
+    "SL": "STOP LOSS",
+    "BE": "STOP (himoya)",
+    "TP1": "TP1 (+1R)",
+    "TP3": "TP3 (Lot1)",
+    "TP4": "TP4 (Lot2)",
+    "TP5": "TP5 (Lot2)",
+    "VAQT TUGADI": "VAQT TUGADI",
+    "BEKOR (yangi signal)": "BEKOR",
+    "BEKOR": "BEKOR",
+}
+
+
+def _reason(p) -> str:
+    raw = str(getattr(p, "close_reason", "") or "").strip()
+    if raw:
+        return _REASON_WORDS.get(raw.upper(), raw)
+    return "yopilgan"
+
+
+def _when(dt) -> str:
+    from app.core.timeuz import format_tashkent
+    return format_tashkent(dt) if dt else "—"
+
+
+def _dur(p) -> str:
+    from app.notifications.telegram import _duration_text
+    return _duration_text(getattr(p, "opened_at", None), getattr(p, "closed_at", None))
+
+
 def _account_lines(acc, open_pos, closed) -> list[str]:
     pnl = acc.balance - acc.initial_balance
     pnl_pct = (pnl / acc.initial_balance * 100) if acc.initial_balance else 0.0
@@ -63,8 +93,60 @@ def _account_lines(acc, open_pos, closed) -> list[str]:
         for p in closed[:5]:
             r = f" ({p.r_multiple:+.2f}R)" if p.r_multiple is not None else ""
             ico = "🟢" if (p.realized_pnl or 0) >= 0 else "🔴"
-            lines.append(f"{ico} {full_label(p.symbol)} {p.direction}: {p.realized_pnl:+.2f}${r}")
+            lines.append(
+                f"{ico} {full_label(p.symbol)} {p.direction}: {p.realized_pnl:+.2f}${r}\n"
+                f"   📌 {_reason(p)} · 🏁 {_when(p.closed_at)} · ⏳ {_dur(p)}"
+            )
     return lines
+
+
+@router.message(F.text.startswith("/natija"))
+async def last_results(message: Message) -> None:
+    """Oxirgi yopilgan bitimlar: qachon, nima uchun, qancha foyda/zarar."""
+    engine = PaperEngine()
+    uid = message.from_user.id
+    async with async_session_factory() as session:
+        acc = await engine.get_account(session, uid)
+        closed = await engine.recent_closed(session, uid, limit=10)
+        summary = await engine.account_summary(session, uid)
+    if not closed:
+        await message.answer(
+            "Hozircha yopilgan bitim yo'q.\n"
+            "Signal kelganda avto-trade 2 lot ochadi; TP yoki SL urilganda natija shu yerga yoziladi.",
+            parse_mode="HTML",
+        )
+        return
+    icon = "🟢" if summary["pnl"] >= 0 else "🔴"
+    out = [
+        "📋 <b>OXIRGI NATIJALAR (WIN / LOSE)</b>",
+        "━━━━━━━━━━━━━━━━",
+    ]
+    for p in closed:
+        win = (p.realized_pnl or 0) > 0.05
+        out.append(
+            f"{'✅' if win else '❌'} <b>{full_label(p.symbol)}</b> {p.direction} "
+            f"{str(p.timeframe or '').upper()}\n"
+            f"   📌 Sabab: <b>{_reason(p)}</b>\n"
+            f"   🕐 Ochilgan: {_when(getattr(p, 'opened_at', None))}\n"
+            f"   🏁 Yopilgan: {_when(getattr(p, 'closed_at', None))}  (⏳ {_dur(p)})\n"
+            f"   📥 {fmt_price(p.entry)} → 🏁 {fmt_price(getattr(p, 'close_price', None))}\n"
+            f"   💵 {p.realized_pnl:+,.2f}$ "
+            f"({'%+.2fR' % p.r_multiple if p.r_multiple is not None else '—'})"
+        )
+    out += [
+        "━━━━━━━━━━━━━━━━",
+        f"🏦 Balans: <b>${summary['balance']:,.2f}</b>  {icon} "
+        f"{summary['pnl']:+,.2f}$ ({summary['pnl_pct']:+.1f}%)",
+        f"📊 Bitimlar: {summary['trades']} | G'alaba: {summary['winrate']:.0f}% | "
+        f"Ochiq: {summary['open_count']}",
+    ]
+    await message.answer("\n".join(out), parse_mode="HTML")
+
+
+@router.message(F.text.startswith("/hisob"))
+async def paper_account_cmd(message: Message) -> None:
+    """Buyruq ko'rinishida ham ishlaydi: /hisob"""
+    await paper_account_message(message)
 
 
 @router.message(F.text == "💼 Hisob (paper)")

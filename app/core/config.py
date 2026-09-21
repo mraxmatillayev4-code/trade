@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     # yuqori chegara YO'Q — 30-50 ta bo'lsa ham yuborilaveradi).
     signal_cooldown_minutes: int = 15
     signal_expiry_candles: int = 36
+
+    # --- Kanal signallari (asosan 1m OLTIN) ---
+    channel_timeframe: str = "1m"        # kanal signali yozilmagan bo'lsa shu TF
+    channel_use_post_tp: bool = True     # kanal o'zi yozgan TP larni ishlatish
+    channel_expiry_minutes: int = 240    # M1 signal shu daqiqada yopilmasa: muddat tugadi
+    expiry_sweep_seconds: int = 300      # muddat tekshiruvi davri (sekund)
     multi_timeframe_enabled: bool = True
     store_candles: bool = True
     # Ixtiyoriy tashqi AI (Groq/OpenAI mos). Bo'sh = faqat mahalliy AI.
@@ -157,7 +163,11 @@ class Settings(BaseSettings):
 
     @property
     def symbol_list(self) -> list[str]:
-        return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        # OLTIN har doim kuzatiladi (kanallar asosan oltin beradi)
+        syms = [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        if "XAUUSDT" not in syms:
+            syms.insert(0, "XAUUSDT")
+        return syms
 
     @property
     def timeframe_list(self) -> list[str]:
@@ -170,6 +180,15 @@ class Settings(BaseSettings):
         if "1m" not in tfs:
             tfs = ["1m"] + tfs
         return tfs
+
+    def expiry_minutes_for(self, timeframe: str, quality_mode: str = "") -> int:
+        """Signal muddati (daqiqa). Kanal M1 signallari uchun alohida sozlama."""
+        tf = (timeframe or "1m").lower()
+        if (quality_mode or "").upper() == "CHANNEL":
+            return max(5, int(self.channel_expiry_minutes))
+        per_tf = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+                  "1h": 60, "4h": 240, "1d": 1440}.get(tf, 15)
+        return max(10, per_tf * max(1, int(self.signal_expiry_candles)))
 
     @property
     def active_strategy_keys(self) -> list[str]:

@@ -107,7 +107,8 @@ async def get_confirmations(session: AsyncSession, signal_id: int) -> list[Signa
 
 async def close_signal(session: AsyncSession, signal: Signal, status: SignalStatus,
                        result: str | None, r_multiple: float | None,
-                       pnl_percent: float | None, close_price: float) -> None:
+                       pnl_percent: float | None, close_price: float,
+                       reason: str = "") -> None:
     signal.status = status.value
     signal.is_active = False
     signal.result = result
@@ -115,6 +116,11 @@ async def close_signal(session: AsyncSession, signal: Signal, status: SignalStat
     signal.pnl_percent = pnl_percent
     signal.close_price = close_price
     signal.closed_at = datetime.now(timezone.utc)
+    try:
+        if reason:
+            signal.close_reason = reason[:24]
+    except Exception:  # noqa: BLE001
+        pass
     await session.commit()
 
 
