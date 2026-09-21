@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-50"
+__version__ = "SINO-LAI-67"
 
 import difflib
 import re

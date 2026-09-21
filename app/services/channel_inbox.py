@@ -716,8 +716,12 @@ async def _ensure_schema(session, force: bool = False) -> str:
 
 # ==========================================================================
 
-async def _active_signals_count(session) -> int:
-    """v62: bir vaqtda ochiq signallar soni (ochiq lotlar + faol signal yozuvlari)."""
+async def _active_signals_count(session, direction: str | None = None) -> int:
+    """v62/v67: bir vaqtda ochiq signallar soni (ochiq lotlar + faol signal yozuvlari).
+
+    v67: `direction` berilsa — FAQAT shu yo'nalishdagi signallar sanaladi
+    ("BUY" yoki "SELL"). Sell va Buy alohida hisoblanadi.
+    """
     from sqlalchemy import func, select
 
     from app.core.enums import PaperStatus
@@ -726,29 +730,53 @@ async def _active_signals_count(session) -> int:
 
     n = 0
     try:
-        r = await session.execute(
-            select(func.count(func.distinct(PaperPosition.signal_id))).where(
-                PaperPosition.status == PaperStatus.OPEN.value,
-                PaperPosition.signal_id.isnot(None),
-            )
+        q = select(func.count(func.distinct(PaperPosition.signal_id))).where(
+            PaperPosition.status == PaperStatus.OPEN.value,
+            PaperPosition.signal_id.isnot(None),
         )
+        if direction:
+            q = q.where(PaperPosition.direction == direction)
+        r = await session.execute(q)
         n = int(r.scalar() or 0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CH] ochiq lotlar sanovi: %s", exc)
     try:
-        r2 = await session.execute(
-            select(func.count(Signal.id)).where(Signal.is_active.is_(True))
-        )
+        q2 = select(func.count(Signal.id)).where(Signal.is_active.is_(True))
+        if direction:
+            q2 = q2.where(Signal.direction == direction)
+        r2 = await session.execute(q2)
         n = max(n, int(r2.scalar() or 0))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CH] faol signallar sanovi: %s", exc)
     return n
 
 
-async def _limit_blocked(session, settings) -> tuple[bool, int, int]:
-    """v62: (bloklanganmi, ochiq soni, limit) — bir vaqtda maks. N ta faol signal."""
+async def _opposite_blocked(session, direction: str | None) -> tuple[bool, int, str]:
+    """v67: qarama-qarshi yo'nalishda ochiq (faol) signal bormi.
+
+    Real savdoda bir vaqtda 2 SELL + 1 BUY o'ynalmaydi: bir yo'nalish ochiq
+    bo'lsa, TESKARI yo'nalishdagi yangi signal OLINMAYDI.
+    """
+    if direction not in ("BUY", "SELL"):
+        return False, 0, ""
+    other = "SELL" if direction == "BUY" else "BUY"
+    try:
+        n_other = await _active_signals_count(session, other)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] qarama-qarshi yo'nalish sanovi: %s", exc)
+        return False, 0, other
+    return (n_other > 0), n_other, other
+
+
+async def _limit_blocked(session, settings,
+                         direction: str | None = None) -> tuple[bool, int, int]:
+    """v62/v67: (bloklanganmi, ochiq soni, limit).
+
+    v67: chegara YO'NALISH bo'yicha — bir yo'nalishda maks. N ta faol signal.
+    Ya'ni 3 ta SELL ochiq bo'lsa, yangi SELL tashlanadi; BUY o'z hisobida.
+    """
     limit_act = int(getattr(settings, "max_active_signals", 3) or 3)
-    n_act = await _active_signals_count(session)
+    n_act = await _active_signals_count(session, direction)
     return (n_act >= limit_act), n_act, limit_act
 
 
@@ -895,20 +923,42 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
         f"Muddat: {int(getattr(settings, 'channel_expiry_minutes', 240))} daqiqa\n"
         f"<code>{snippet}</code>"
     )
-    # v62: bir vaqtda ko'pi bilan N ta faol signal. Ortiqchasi TASHLANADI (navbat yo'q —
-    # bittasi yopilgach ham eski signal qaytarilmaydi, faqat keyingi YANGI signal olinadi).
+    # v67: qarama-qarshi yo'nalish ochiq bo'lsa — yangi signal OLINMAYDI
+    # (bir vaqtda 2 SELL + 1 BUY real savdoda o'ynalmaydi).
     try:
-        _blocked, n_act, limit_act = await _limit_blocked(session, settings)
-        if _blocked:
+        _opp, n_other, other_dir = await _opposite_blocked(session, direction.value)
+        if _opp:
             logger.warning(
-                "[CH] LIMIT %d/%d — yangi signal qabul qilinmadi: %s %s (%s)",
-                n_act, limit_act, symbol, direction.value, src)
+                "[CH] QARAMA-QARSHI %s ochiq (%d ta) — yangi %s signal olinmadi: %s (%s)",
+                other_dir, n_other, direction.value, symbol, src)
             try:
                 await tell_admin(
-                    f"\u23F8 <b>Faol signal chegarasi</b>: {n_act}/{limit_act} ta ochiq.\n"
-                    f"Yangi signal tashlab yuborildi — {symbol} {direction.value} ({_esc(src)}).\n"
-                    "<i>Bittasi yopilgach, bot keyingi YANGI signalni oladi; eski signalni "
-                    "qaytarmaydi.</i>"
+                    f"\u23F8 <b>Qarama-qarshi yo\'nalish ochiq</b>: {other_dir} ({n_other} ta).\n"
+                    f"Yangi {direction.value} signal olinmadi \u2014 {symbol} ({_esc(src)}).\n"
+                    "<i>Bir vaqtda faqat BITTA yo'nalish ishlaydi: yo 3 ta SELL, yo 3 ta BUY. "
+                    "Ochig'i yopilgach bot keyingi YANGI signalni oladi.</i>"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return "opposite"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] qarama-qarshi yo'nalish tekshiruvi: %s", exc)
+
+    # v62/v67: BIR YO'NALISHDA ko'pi bilan N ta faol signal. Ortiqchasi TASHLANADI
+    # (navbat yo'q — bittasi yopilgach ham eski signal qaytarilmaydi, faqat YANGI olinadi).
+    try:
+        _blocked, n_act, limit_act = await _limit_blocked(session, settings, direction.value)
+        if _blocked:
+            logger.warning(
+                "[CH] LIMIT %s %d/%d — yangi signal qabul qilinmadi: %s (%s)",
+                direction.value, n_act, limit_act, symbol, src)
+            try:
+                await tell_admin(
+                    f"\u23F8 <b>Faol signal chegarasi</b> ({direction.value}): "
+                    f"{n_act}/{limit_act} ta ochiq.\n"
+                    f"Yangi {direction.value} signal tashlab yuborildi — {symbol} ({_esc(src)}).\n"
+                    "<i>Chegara yo'nalish bo'yicha: bir yo'nalishda 3 ta. "
+                    "Bittasi yopilgach bot keyingi YANGI signalni oladi.</i>"
                 )
             except Exception:  # noqa: BLE001
                 pass
