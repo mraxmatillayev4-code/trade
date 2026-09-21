@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-69"
+__version__ = "SINO-LAI-70"
 
 import difflib
 import re
@@ -745,6 +745,46 @@ def _result_veto(text: str, has_plan: bool) -> str:
     return ""
 
 
+# --- v70: terminal (MT5) skrinshoti — natija/history rasmi, SIGNAL EMAS ---
+_SCREEN_MONEY = re.compile(r"[+-]\s*\d+(?:[.,]\d+)?\s*(?:USD|usd|\$)", re.I)
+_SCREEN_USD = re.compile(r"\b\d+(?:[.,]\d{1,2})?\s*USD\b", re.I)
+_SCREEN_PL = re.compile(
+    r"\b(?:P\s*/?\s*L|profit|profitability|loss|foyda|zarar|equity|floating)\b"
+    r"\s*[:=\-]?\s*[+-]?\d", re.I)
+_SCREEN_TABS = re.compile(
+    r"(?:free\s*margin|margin\s*level|equity|balance\s*[:=]|balans\s*[:=]|"
+    r"history\b.{0,60}\b(?:trade|settings|quotes)|quotes\s+chart\s+trade)", re.I | re.S)
+# "SELL 4350.5" — reja darajasi bilan yozilgan (HAQIQIY narx), "SELL 0.11" emas
+_SCREEN_LEVEL = re.compile(
+    r"\b(?:sl|stop|stoploss|tp|target|entry|kirish|buy|sell|long|short|order)\b"
+    r"\s*[:=\-]?\s*\d{3,5}(?:[.,]\d{1,3})?", re.I)
+_SCREEN_PIPS = re.compile(r"[+-]?\s*\d{1,4}\s*(?:pip|pips|punkt)\b", re.I)
+
+
+def _screen_veto(ocr: str, cap: str = "") -> str:
+    """v70: MT5/terminal skrinshoti — ochiq bitim yoki history rasmi.
+
+    Bunday rasmda «SELL 0.11 +48.69 USD», «P/L», «Equity», hajm va pul turadi;
+    aniq reja (SL/TP yonida HAQIQIY 3-5 xonali narx) bo'lmasa — bu signal emas.
+    """
+    s = ocr or ""
+    if not s.strip():
+        return ""
+    has_money = bool(_SCREEN_MONEY.search(s)) or bool(_SCREEN_USD.search(s))
+    has_level = bool(_SCREEN_LEVEL.search(s))
+    if has_level and not has_money:
+        return ""          # haqiqiy signal kartasi (daraja bilan yozilgan)
+    if _SCREEN_MONEY.search(s):
+        return "terminal skrinshoti (P/L pul qiymati)"
+    if _SCREEN_PL.search(s):
+        return "terminal skrinshoti (foyda/zarar qatori)"
+    if _SCREEN_PIPS.search(s) and not has_level:
+        return "natija skrinshoti (pips hisoboti)"
+    if _SCREEN_TABS.search(s) and has_money:
+        return "terminal skrinshoti (hisob qatori)"
+    return ""
+
+
 def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     """Sabab qaytarsa — bu signal EMAS (qat'iy).
 
@@ -863,6 +903,9 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     raw = "\n".join(p for p in (cap, ocra) if p)
     # v62: natija/otziv/bekor xabarlari — juftlik va kontekstdan qat'i nazar SIGNAL EMAS
     _early = _result_veto(raw, False) or _result_veto(cap, False)
+    if not _early:
+        # v70: OCR — MT5 terminal skrinshoti (ochiq bitim / history / P/L)
+        _early = _screen_veto(ocra, cap)
     if _early:
         return None, _early, True
     body = _pre(raw)

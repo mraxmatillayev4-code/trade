@@ -7,6 +7,7 @@ EMAS chatga yuborilmaydi.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
@@ -131,6 +132,103 @@ async def _diag_skip(src: str, key, sample: str) -> None:
 def bind(candles, paper, tracker, notifier, settings: Settings) -> None:
     global _candles, _paper, _tracker, _notifier, _settings
     _candles, _paper, _tracker, _notifier, _settings = candles, paper, tracker, notifier, settings
+
+
+# ============ v70: XABAR XOTIRASI (bir xil xabar qayta ishlanmasin) ============
+# Muammo: bitta xabar uchun bot 4 marta urindi — qaysi xabarni ko'rganini
+# bilmasdi (jarayon qayta ishga tushsa yoki kanal bir xilini qayta tashlasa).
+_MSG_FP: dict[str, float] = {}
+_FP_TTL = 3 * 3600.0          # 3 soat ichida bir xil xabar qayta ishlanmaydi
+_FP_MAX = 900
+_FP_COMPONENT = "msgfp"
+_fp_loaded = False
+
+# Ogohlantirishlar (qarama-qarshi / chegara) — bir manbadan 10 daqiqada 1 marta
+_ALERT_AT: dict[str, float] = {}
+_ALERT_WINDOW = 600.0
+
+
+def _fp_text(text: str) -> str:
+    import re as _r
+    return _r.sub(r"\s+", " ", (text or "").strip().lower())[:400]
+
+
+def _fp_key(src_key: str, text: str, msg_id: int) -> str:
+    import hashlib
+    body = _fp_text(text)
+    if not body:
+        body = "mid:%d" % int(msg_id or 0)
+    return "%s|%s" % (src_key or "?", hashlib.sha1(body.encode("utf-8")).hexdigest()[:16])
+
+
+async def _fp_load() -> None:
+    """Xabar xotirasini bazadan yuklaydi (qayta ishga tushgandan keyin ham eslaydi)."""
+    global _fp_loaded
+    if _fp_loaded:
+        return
+    _fp_loaded = True
+    try:
+        from app.database.session import async_session_factory
+        from app.services.channel_store import load_json_log
+        async with async_session_factory() as s:
+            data = await load_json_log(s, _FP_COMPONENT)
+        now = time.time()
+        for k, v in (data.get("items") or {}).items():
+            try:
+                ts = float(v)
+            except (TypeError, ValueError):
+                continue
+            if now - ts <= _FP_TTL:
+                _MSG_FP[str(k)] = ts
+        logger.info("[CH] xabar xotirasi yuklandi: %d ta", len(_MSG_FP))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] xabar xotirasi yuklanmadi: %s", exc)
+
+
+async def _fp_save() -> None:
+    try:
+        from app.database.session import async_session_factory
+        from app.services.channel_store import save_json_log
+        async with async_session_factory() as s:
+            await save_json_log(s, _FP_COMPONENT, {"items": dict(_MSG_FP)})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] xabar xotirasi saqlanmadi: %s", exc)
+
+
+async def _fp_seen(src_key: str, text: str, msg_id: int) -> bool:
+    """True — shu xabar allaqachon ishlangan (takror). Xotira bazada saqlanadi."""
+    if not _fp_text(text) and not msg_id:
+        return False
+    await _fp_load()
+    now = time.time()
+    for k in [k for k, v in list(_MSG_FP.items()) if now - v > _FP_TTL]:
+        _MSG_FP.pop(k, None)
+    key = _fp_key(src_key, text, msg_id)
+    prev = _MSG_FP.get(key)
+    _MSG_FP[key] = now
+    if len(_MSG_FP) > _FP_MAX:
+        for k, _v in sorted(_MSG_FP.items(), key=lambda kv: kv[1])[: len(_MSG_FP) - _FP_MAX]:
+            _MSG_FP.pop(k, None)
+    if prev is None:
+        await _fp_save()
+        return False
+    logger.info("[CH] XABAR XOTIRASI: takror (%s) — %.0f s oldin ko'rilgan",
+                key.split("|")[0], now - prev)
+    return True
+
+
+async def _alert_once(kind: str, src: str, text: str, minutes: float = 10.0) -> bool:
+    """Bir xil ogohlantirishni 10 daqiqada bir martadan ko'p yubormaydi."""
+    now = time.time()
+    key = "%s|%s" % (kind, (src or "?").strip().lower())
+    last = float(_ALERT_AT.get(key) or 0.0)
+    if now - last < minutes * 60.0:
+        logger.info("[CH] ogohlantirish TAKRORLANMADI (%s %s) — %.0f s oldin yuborilgan",
+                    kind, src, now - last)
+        return False
+    _ALERT_AT[key] = now
+    await tell_admin(text)
+    return True
 
 
 async def tell_admin(text: str) -> None:
@@ -439,6 +537,14 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
         if len(_seen) > 4000:
             _seen.clear()
             _seen.add(key)
+
+    # v70: bir xil xabar (yoki qayta o'qilgan xabar) QAYTA ishlanmaydi —
+    # na karta, na ogohlantirish. OCR ham qayta chaqirilmaydi.
+    try:
+        if await _fp_seen(uname or ("id%d" % bare if bare else "?"), text or "", msg_id):
+            return "dup_msg"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] xabar xotirasi tekshiruvi: %s", exc)
 
     raw = _read_text(text, image_bytes)
     closing = is_close_message(text) or is_close_message(raw)
@@ -932,7 +1038,8 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
                 "[CH] QARAMA-QARSHI %s ochiq (%d ta) — yangi %s signal olinmadi: %s (%s)",
                 other_dir, n_other, direction.value, symbol, src)
             try:
-                await tell_admin(
+                await _alert_once(
+                    "opposite:" + str(direction.value), src,
                     f"\u23F8 <b>Qarama-qarshi yo\'nalish ochiq</b>: {other_dir} ({n_other} ta).\n"
                     f"Yangi {direction.value} signal olinmadi \u2014 {symbol} ({_esc(src)}).\n"
                     "<i>Bir vaqtda faqat BITTA yo'nalish ishlaydi: yo 3 ta SELL, yo 3 ta BUY. "
@@ -953,7 +1060,8 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
                 "[CH] LIMIT %s %d/%d — yangi signal qabul qilinmadi: %s (%s)",
                 direction.value, n_act, limit_act, symbol, src)
             try:
-                await tell_admin(
+                await _alert_once(
+                    "limit:" + str(direction.value), src,
                     f"\u23F8 <b>Faol signal chegarasi</b> ({direction.value}): "
                     f"{n_act}/{limit_act} ta ochiq.\n"
                     f"Yangi {direction.value} signal tashlab yuborildi — {symbol} ({_esc(src)}).\n"
