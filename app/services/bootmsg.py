@@ -43,8 +43,18 @@ def build_text(cmds: list[str] | None = None) -> str:
         "(\u21A9\uFE0F Qaytarish bor).",
         "\u2022 Faqat SIGNALLAR o'qiladi: grafik/terminal skrinshotlari signal emas "
         "\u2014 matnda to'liq reja (yo'nalish + SL/TP) bo'lishi kerak.",
-        "\u2022 Har signalda MANBASI ko'rinadi: qaysi kanal, qaysi post, qachon "
-        "tashlangan, xabar matni va rasmda yozilgani.",
+        "\u2022 SIGNAL kartasi QISQA; manba, lotlar va foyda hisobi \u00AB\u2753 Nega bu "
+        "signal?\u00BB sahifasida.",
+        "\u2022 Natija (WIN/LOSE) kartasi ham qisqa \u2014 to'liq tafsilot \u00AB\U0001F4D6 To'liq "
+        "tafsilot\u00BB tugmasida.",
+        "\u2022 RISK/MONEY MANAGEMENT: hajm balansning <b>0.5%</b> (yoki 1%/2%) riskidan "
+        "hisoblanadi \u2014 /risk.",
+        "\u2022 TP har doim AYNAN TP narxida, SL esa bozor narxida (gap bo'lsa) \u2014 "
+        "brokerdagidek.",
+        "\u2022 Eski/kechikkan signal (narx kirishdan uzoq) ochilmaydi \u2014 yolg'on "
+        "natija yozilmasin.",
+        "\u2022 Akkaunt va kanallar ZAXIRADA (/zaxira) \u2014 yangilanishdan keyin qayta "
+        "ulash shart emas.",
         "\u2022 O'tgan signallar haqidagi maqtov/natija postlari SIGNAL EMAS.",
         "\u2022 Bozor kuzatuvi aniq: sham yetib kelmasa yoki narx to'xtasa \u2014 "
         "darhol ogohlantirish keladi.",

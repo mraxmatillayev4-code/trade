@@ -52,6 +52,8 @@ _cmds = [
     ("tozalash", "🧹 Hammasini tozalash (noldan)"),
     ("broker", "🏦 Broker (MT5 demo/real) ulash"),
     ("db", "💾 /DB - bazani yuklab olish (Supabase/Neon)"),
+    ("risk", "⚖️ Risk foizi (0.5% / 1% / 2%) - money management"),
+    ("zaxira", "🛡 Akkaunt va kanallar zaxirasi (qayta ulash shart emas)"),
 ]
 
 
@@ -99,6 +101,19 @@ class Application:
                 logger.info("[AI-WEB] internet xotirasi tayyor")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AI-WEB] xotira: %s", exc)
+        # v82: akkaunt va kanallar zaxirasi — yangilanishdan keyin qayta ulanmaslik
+        try:
+            from app.services import persist
+            fixed = await persist.restore_if_missing()
+            if fixed and self.notifier is not None:
+                try:
+                    await self.notifier.send_admin(fixed)
+                except Exception:  # noqa: BLE001
+                    pass
+            await persist.save_guard()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[PERSIST] guard: %s", exc)
+
         # v50: yangi ustunlar (signals.close_reason, paper_positions.close_reason)
         # eski bazada ham bo'lishi shart — aks holda har bir yozuv xato beradi.
         try:

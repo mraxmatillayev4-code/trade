@@ -8,6 +8,7 @@ from app.bot.handlers import (
     dbadmin,
     market,
     paper,
+    persist,
     reports,
     settings,
     signals,
@@ -28,6 +29,7 @@ def get_main_router() -> Router:
     router.include_router(stats.router)
     router.include_router(backtest.router)
     router.include_router(paper.router)
+    router.include_router(persist.router)
     router.include_router(reports.router)
     router.include_router(settings.router)
     return router

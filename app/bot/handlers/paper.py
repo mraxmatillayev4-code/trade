@@ -145,8 +145,9 @@ def _open_block(group: list) -> list[str]:
         _money = lot_money_text(p)
         _prof = lot_profit_text(p)          # v79: maqsad narxi + foyda ($)
         try:
-            from app.engine.risk import money_for_move
-            _t = float(getattr(p, "tp3", 0) or getattr(p, "tp2", 0) or 0)
+            from app.engine.risk import lot_target_price, money_for_move
+            _t = float(lot_target_price(p) or 0) or float(getattr(p, "tp3", 0) or
+                                                          getattr(p, "tp2", 0) or 0)
             _rq = float(getattr(p, "qty_remaining", 0) or 0)
             if _t > 0 and _rq > 0:
                 goal += money_for_move(str(getattr(p, "direction", "BUY")),
@@ -180,11 +181,23 @@ def _account_lines(acc, open_pos, closed, stats: dict | None = None) -> list[str
     wr = (wins / trades * 100.0) if trades else 0.0
     try:
         from app.core.config import get_settings
+        from app.engine import sizing as _sz_mod
         _st = get_settings()
-        lot_size = float(getattr(_st, "lot_size", 1.0) or 1.0)
+        lot_size = float(getattr(_st, "lot_size", 1.0) or 1.0)   # yuqori chegara
         contract = float(getattr(_st, "contract_size", 100.0) or 100.0)
+        # v82: risk % va shu lahzadagi hajm (oxirgi signal masofasi bilan)
+        _rp = float(getattr(acc, "risk_percent", None) or _st.risk_percent or 0.5)
+        _half_lot = 0.0
+        _tot_lot = 0.0
+        _risk_d = acc.balance * _rp / 100.0
+        if open_pos:
+            _p0 = open_pos[0]
+            _dist = abs(float(getattr(_p0, "entry", 0) or 0) - float(getattr(_p0, "sl", 0) or 0))
+            _s = _sz_mod.size_for(float(acc.balance or 0), _rp, _dist,
+                                  contract=contract, max_lot=lot_size)
+            _half_lot, _tot_lot, _risk_d = _s["half_lot"], _s["lot"], _s["risk_money"]
     except Exception:  # noqa: BLE001
-        lot_size, contract = 1.0, 100.0
+        lot_size, contract, _rp, _half_lot, _tot_lot, _risk_d = 1.0, 100.0, 0.5, 0.0, 0.0, 0.0
     lines = [
         "💼 <b>SIZNING VIRTUAL HISOBINGIZ</b>",
         "━━━━━━━━━━━━━━━━",
@@ -193,8 +206,11 @@ def _account_lines(acc, open_pos, closed, stats: dict | None = None) -> list[str
         f"{icon} Jami natija: <b>{pnl:+,.2f}$ ({pnl_pct:+.2f}%)</b>",
         f"📊 Bitimlar: <b>{trades}</b> (🏆{wins} / 💥{losses}"
         + (f" / ⚖️{be}" if be else "") + f") | G'alaba: <b>{wr:.0f}%</b>",
-        f"\u2696\uFE0F Hajm: <b>{lot_size / 2:,.2f} + {lot_size / 2:,.2f} lot</b> "
-        f"(jami {lot_size:,.2f} lot \u00B7 1 lot = {contract:,.0f} oz)",
+        f"\u2696\uFE0F <b>RISK: {_rp:.2f}%</b> = {_risk_d:,.2f}$ "
+        f"\u00B7 hajm <b>{_half_lot:,.2f} + {_half_lot:,.2f} lot</b> "
+        f"(jami {_tot_lot:,.2f} lot \u00B7 1 lot = {contract:,.0f} oz)",
+        "<i>Hajm har signalda balans va stop masofasiga qarab qayta hisoblanadi "
+        "(0.5%/1%/2% — ⚙️ Sozlamalar).</i>",
         f"🔴 Ketma-ket zarar: {acc.consecutive_losses}",
         f"🤖 Avto-trade: <b>{auto}</b>",
         f"📂 Ochiq: <b>{open_signals}</b> bitim ({len(open_pos)} lot)",

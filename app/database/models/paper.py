@@ -32,6 +32,9 @@ class PaperAccount(Base):
     total_trades: Mapped[int] = mapped_column(Integer, default=0)
     total_wins: Mapped[int] = mapped_column(Integer, default=0)
 
+    # v82: risk/money management — shu hisob uchun risk foizi (0.5 / 1 / 2)
+    risk_percent: Mapped[float] = mapped_column(Float, default=0.5)
+
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"

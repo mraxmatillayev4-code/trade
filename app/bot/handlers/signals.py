@@ -12,7 +12,13 @@ from app.core.symbols import full_label
 from app.core.timeuz import format_short
 from app.database import crud
 from app.database.session import async_session_factory
-from app.notifications.telegram import fmt_price, format_signal_full, format_signal_short
+from app.notifications.telegram import (
+    fmt_price,
+    format_result,
+    format_result_short,
+    format_signal_full,
+    format_signal_short,
+)
 
 router = Router(name="signals")
 
@@ -90,7 +96,10 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         _qlot = _qty / 100.0 if str(getattr(q, "symbol", "")).upper().startswith(
             ("XAU", "GOLD")) else _qty
         _qrem = float(getattr(q, "qty_remaining", 0) or 0)
-        _tgt = float(getattr(q, "tp3", 0) or getattr(q, "tp2", 0) or 0)
+        # v82: maqsad R bo'yicha (Lot1 +3R, Lot2 +5R) — tp maydoniga bog'liq emas
+        from app.engine.risk import lot_target_price as _ltp
+        _tgt = float(_ltp(q) or 0) or float(getattr(q, "tp3", 0) or
+                                            getattr(q, "tp2", 0) or 0)
         # v79: foyda ham zarar kabi ANIQ hisoblanadi (qolgan hajm x narx farqi)
         _prof = ""
         if _tgt > 0 and _qrem > 0:
@@ -120,7 +129,8 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         _goal = 0.0
         _parts: list[str] = []
         for q in positions:
-            _t = float(getattr(q, "tp3", 0) or getattr(q, "tp2", 0) or 0)
+            _t = float(_ltp(q) or 0) or float(getattr(q, "tp3", 0) or
+                                              getattr(q, "tp2", 0) or 0)
             _rq = float(getattr(q, "qty_remaining", 0) or 0)
             if _t <= 0 or _rq <= 0:
                 continue
@@ -354,6 +364,18 @@ async def filter_signals(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+async def _finance_of(uid: int) -> tuple[float, float | None]:
+    """v82: foydalanuvchi hisobidan balans va risk % (karta hajmi uchun)."""
+    try:
+        from app.paper_trading.engine import PaperEngine
+        async with async_session_factory() as s3:
+            acc = await PaperEngine().get_account(s3, int(uid))
+        return (float(getattr(acc, "balance", 0) or 0),
+                getattr(acc, "risk_percent", None))
+    except Exception:  # noqa: BLE001
+        return 0.0, None
+
+
 @router.callback_query(F.data.startswith("sig:why:"))
 async def explain(callback: CallbackQuery) -> None:
     signal_id = int(callback.data.split(":")[-1])
@@ -384,9 +406,67 @@ async def explain(callback: CallbackQuery) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SIG] arxiv manbasi: %s", exc)
     # To'liq tafsilot sahifasi; "Signalga qaytish" tugmasi qisqa kartaga qaytaradi
+    _bal, _rp = await _finance_of(callback.from_user.id)
     await callback.message.edit_text(
-        format_signal_full(signal),
+        format_signal_full(signal, balance=_bal, risk_percent=_rp),
         reply_markup=kb.signal_detail_kb(signal_id),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
+async def _result_payload(session, signal_id: int):
+    """Signal + shu signalning paper lotlari (natija kartasi uchun)."""
+    from sqlalchemy import select
+
+    from app.database.models.paper import PaperPosition
+    from app.database.session import async_session_factory as _asf
+
+    async with _asf() as s2:
+        sig = await crud.get_signal_by_id(s2, signal_id)
+        if sig is None:
+            return None, []
+        rows = list((await s2.execute(
+            select(PaperPosition).where(PaperPosition.signal_id == signal_id)
+            .order_by(PaperPosition.id)
+        )).scalars().all())
+    main_uid = rows[0].user_id if rows else None
+    own = [p for p in rows if p.user_id == main_uid] if rows else []
+    return sig, own
+
+
+@router.callback_query(F.data.startswith("res:full:"))
+async def result_full_view(callback: CallbackQuery) -> None:
+    """v82: natijaning TO'LIQ tafsiloti (qanday bo'ldi, R xarita, lotlar, $)."""
+    signal_id = int(callback.data.split(":")[-1])
+    async with async_session_factory() as session:
+        sig, own = await _result_payload(session, signal_id)
+    if sig is None:
+        await callback.answer("Signal topilmadi", show_alert=True)
+        return
+    await callback.message.edit_text(
+        format_result(sig, own),
+        reply_markup=kb.result_full_kb(signal_id),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("res:card:"))
+async def result_short_view(callback: CallbackQuery) -> None:
+    """v82: qisqa natija kartasiga qaytish."""
+    signal_id = int(callback.data.split(":")[-1])
+    async with async_session_factory() as session:
+        sig, own = await _result_payload(session, signal_id)
+    if sig is None:
+        await callback.answer("Signal topilmadi", show_alert=True)
+        return
+    text = format_result_short(sig, own)
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb.result_short_kb(signal_id),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -402,8 +482,9 @@ async def back_to_card(callback: CallbackQuery) -> None:
             await callback.answer("Signal topilmadi", show_alert=True)
             return
     # To'liq sahifadan qisqa signal kartasiga qaytamiz
+    _bal, _rp = await _finance_of(callback.from_user.id)
     await callback.message.edit_text(
-        format_signal_short(signal),
+        format_signal_short(signal, balance=_bal, risk_percent=_rp),
         reply_markup=kb.signal_card_kb(signal_id),
         parse_mode="HTML",
         disable_web_page_preview=True,

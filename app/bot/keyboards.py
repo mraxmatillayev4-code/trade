@@ -94,14 +94,25 @@ def reports_reply() -> ReplyKeyboardMarkup:
     )
 
 
-def settings_reply(us) -> ReplyKeyboardMarkup:
+def settings_reply(us, risk: float | None = None) -> ReplyKeyboardMarkup:
     """Sozlamalar bo'limi — oddiy pastki tugmalar (rejim, filtrlar + orqaga)."""
     strong = "✅" if (us and us.strong_only) else "⬜"
     buy = "✅" if (us is None or us.notify_buy) else "⬜"
     sell = "✅" if (us is None or us.notify_sell) else "⬜"
     mode = us.quality_mode if us else "BALANCED"
+    try:
+        from app.core.config import get_settings
+        _d = float(getattr(get_settings(), "risk_percent", 0.5) or 0.5)
+    except Exception:  # noqa: BLE001
+        _d = 0.5
+    _rv = risk if risk is not None else (
+        getattr(us, "risk_percent", None) if us is not None else None)
+    try:
+        _rp = float(_rv) if _rv else _d
+    except (TypeError, ValueError):
+        _rp = _d
     kb = ReplyKeyboardBuilder()
-    kb.row(KeyboardButton(text=f"🎚 Rejim: {mode}"))
+    kb.row(KeyboardButton(text=f"⚖️ Risk {_rp:g}%"), KeyboardButton(text=f"🎚 Rejim: {mode}"))
     kb.row(KeyboardButton(text=f"{strong} Faqat kuchli signallar"))
     kb.row(
         KeyboardButton(text=f"{buy} BUY xabarlari"),
@@ -113,6 +124,23 @@ def settings_reply(us) -> ReplyKeyboardMarkup:
         one_time_keyboard=False,
         is_persistent=False,
         input_field_placeholder="Sozlamani tanlang 👇",
+    )
+
+
+def risk_reply() -> ReplyKeyboardMarkup:
+    """v82: risk foizini tanlash (0.5% / 1% / 2%)."""
+    kb = ReplyKeyboardBuilder()
+    kb.row(
+        KeyboardButton(text="⚖️ Risk 0.5%"),
+        KeyboardButton(text="⚖️ Risk 1%"),
+        KeyboardButton(text="⚖️ Risk 2%"),
+    )
+    kb.row(KeyboardButton(text="⬅️ Orqaga"))
+    return kb.as_markup(
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=False,
+        input_field_placeholder="Risk foizini tanlang 👇",
     )
 
 
@@ -209,6 +237,25 @@ def signal_card_kb(signal_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="❓ Nega bu signal?", callback_data=f"sig:why:{signal_id}")
     kb.button(text="🗑 Yopish", callback_data="msg:delete")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def result_short_kb(signal_id: int) -> InlineKeyboardMarkup:
+    """v82: qisqa natija kartasi ostidagi tugmalar."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="\U0001F4D6 To'liq tafsilot", callback_data=f"res:full:{int(signal_id)}")
+    kb.button(text="\U0001F5D1 Yopish", callback_data="msg:delete")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def result_full_kb(signal_id: int) -> InlineKeyboardMarkup:
+    """v82: to'liq natija sahifasi ostidagi tugmalar (orqaga qaytish)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="\u2B05\uFE0F Qisqa kartaga qaytish",
+              callback_data=f"res:card:{int(signal_id)}")
+    kb.button(text="\U0001F5D1 Yopish", callback_data="msg:delete")
     kb.adjust(1, 1)
     return kb.as_markup()
 

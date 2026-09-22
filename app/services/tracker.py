@@ -184,15 +184,13 @@ class SignalTracker:
         except Exception:  # noqa: BLE001
             return float(level)
         lv = float(level)
+        # v82: TP — LIMIT buyurtma: har doim AYNAN TP narxida bajariladi
+        # (narx nariga sakrasa ham ortiqcha foyda yozilmaydi — brokerdagidek).
+        # SL — bozor buyurtmasi: gap bo'lsa ochilish narxida (zarar ko'proq).
         if kind == "sl":
             if buy and op < lv:
                 return op
             if (not buy) and op > lv:
-                return op
-        else:  # tp
-            if buy and op > lv:
-                return op
-            if (not buy) and op < lv:
                 return op
         return lv
 

@@ -111,10 +111,10 @@ def source_block(signal: Signal, *, full: bool = True, text_limit: int = 700) ->
         name = f"{name} (@{un})"
     out.append(f"   📣 Kanal: <b>{_esc81(name)}</b>")
     if mid:
-        link = ""
+        out.append(f"   🆔 Post: <b>#{mid}</b>")
         if un:
-            link = f"  ·  t.me/{un}/{mid}"
-        out.append(f"   🆔 Post: <b>#{mid}</b>{_esc81(link)}")
+            out.append(f"   🔗 <a href=\"https://t.me/{un}/{mid}\">"
+                       f"Bu signalga ko'chir</a>")
     if posted is not None:
         out.append(f"   🕐 Post vaqti: <b>{format_tashkent(posted)}</b>")
     err = _age_text(getattr(signal, "created_at", None), posted)
@@ -308,15 +308,20 @@ def lot_profit_text(pos) -> str:
 
     «maqsad 4,345.00 (+3R) · foyda +359.55$»
     """
-    from app.engine.risk import money_for_move
+    from app.engine.risk import lot_target_price, lot_target_r, money_for_move
     d = str(getattr(pos, "direction", "") or "BUY").upper()
     entry = float(getattr(pos, "entry", 0) or 0)
     qty = float(getattr(pos, "qty_remaining", 0) or getattr(pos, "qty_total", 0) or 0)
     target = float(getattr(pos, "tp3", 0) or getattr(pos, "tp2", 0) or 0)
+    _r = lot_target_r(getattr(pos, "stage", 0))
+    _tp = lot_target_price(pos)
+    if _tp > 0:
+        target = _tp                      # v82: maqsad R bo'yicha (Lot1 +3R, Lot2 +5R)
     if entry <= 0 or qty <= 0 or target <= 0:
         return ""
     money = money_for_move(d, entry, target, qty)
-    return f"maqsad {fmt_price(target)} \u00B7 \U0001F7E2 foyda {money:+,.2f}$"
+    return (f"maqsad {fmt_price(target)} (+{_r:.0f}R) \u00B7 "
+            f"\U0001F7E2 foyda {money:+,.2f}$")
 
 
 def lot_money_text(pos) -> str:
@@ -363,38 +368,69 @@ def _reason_text(signal: Signal) -> str:
     return _REASON_WORDS.get(st_map.get(st, ""), "—")
 
 
-def format_signal_short(signal: Signal) -> str:
-    """QISQA signal kartasi — kirish, stop, 1R/2R/3R narxlari, ehtimollik."""
+def signal_risk_line(signal, *, balance: float | None = None,
+                     risk_percent: float | None = None) -> str:
+    """v82: risk % va hajm qatori (balans bo'yicha)."""
+    try:
+        from app.core.config import get_settings as _gs
+        from app.engine import sizing as _sz
+        st = _gs()
+        _rp = risk_percent if risk_percent else getattr(st, "risk_percent", 0.5)
+        return _sz.risk_line(float(balance or 0.0),
+                             float(_rp or 0.5),
+                             float(signal.entry or 0), float(signal.sl or 0),
+                             contract=float(getattr(st, "contract_size", 100.0) or 100.0),
+                             max_lot=float(getattr(st, "lot_size", 1.0) or 1.0))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def format_signal_short(signal: Signal, balance: float | None = None,
+                        risk_percent: float | None = None) -> str:
+    """v82: QISQA signal kartasi — faqat kerakli narsa.
+
+    Manba, lotlar tafsiloti, foyda hisobi — hammasi «❓ Nega bu signal?» da.
+    """
     is_buy = signal.direction == "BUY"
-    emoji = "🟢" if is_buy else "🔴"
+    emoji = "\U0001F7E2" if is_buy else "\U0001F534"
     word = "SOTIB OLISH (BUY)" if is_buy else "SOTISH (SELL)"
     pair = full_label(signal.symbol)
-    no = f"№{signal.signal_no}" if signal.signal_no else ""
-    kirish_vaqt = format_tashkent(signal.created_at)
-    rmap = format_r_map(signal.entry, signal.sl, signal.tp1, signal.tp2, signal.tp3)
-    src = _source_line(signal)
-    extra = f"\n{src}" if src else ""
-    return (
-        f"{emoji} <b>{word} SIGNALI</b> {no}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>{pair}</b>  •  ⏱ {signal.timeframe.upper()}\n"
-        f"🕐 <b>Kirish vaqti:</b> {kirish_vaqt}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"{rmap}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🎯 G'alaba ehtimoli: <b>{signal.win_probability:.0f}%</b>  |  "
-        f"📊 Kuch: {signal.score:.1f}/10  |  2 lot"
-        f"{extra}\n"
-        f"<i>Avto-trade: Lot1 +3R, Lot2 +4R/+5R. Zarar −1R.</i>\n"
-        f"<i>⏳ Amal muddati: {_expiry_text(signal)} — shundan keyin bozor narxida yopiladi.</i>\n"
-        f"<i>📣 Natija (WIN/LOSE) kartasi TP yoki SL urilganda avtomatik keladi.</i>\n"
-        f"<i>Tafsilot: «❓ Nega bu signal?»</i>"
-        + ("\n" + "\n".join(source_block(signal, full=False)) if source_block(signal) else "")
-    )
+    no = f"\u2116{signal.signal_no}" if signal.signal_no else ""
+    rl = signal_risk_line(signal, balance=balance, risk_percent=risk_percent)
+    e = float(signal.entry or 0)
+    sl = float(signal.sl or 0)
+    buy = str(signal.direction).upper() == "BUY"
+    from app.engine.risk import r_price as _rp
+    _d = "BUY" if buy else "SELL"
+    _l1, _l2, _l3 = (_rp(_d, e, sl, n) for n in (1, 2, 3))
+    _l4, _l5 = _rp(_d, e, sl, 4), _rp(_d, e, sl, 5)
+    lines = [
+        f"{emoji} <b>{word} SIGNALI</b> {no}",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        f"\U0001F4B0 <b>{pair}</b>  \u2022  \u23F1 {signal.timeframe.upper()}  \u2022  "
+        f"{format_tashkent(signal.created_at)}",
+        f"\u25B6\uFE0F Kirish <b>{fmt_price(e)}</b>  \u00B7  \U0001F6D1 Stop "
+        f"<b>{fmt_price(sl)}</b>",
+        f"\u2705 +1R {fmt_price(_l1)} \u00b7 +2R {fmt_price(_l2)} \u00b7 "
+        f"+3R {fmt_price(_l3)}",
+        f"\U0001F3AF Lot2: +4R {fmt_price(_l4)} \u00b7 +5R {fmt_price(_l5)}",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+    ]
+    if rl:
+        lines.append(rl)
+    lines.append(f"\U0001F3AF G'alaba: <b>{signal.win_probability:.0f}%</b>  |  "
+                 f"\U0001F4CA Kuch: {signal.score:.1f}/10  |  2 lot")
+    lines.append(f"\u23F3 Amal muddati: {_expiry_text(signal)}")
+    lines.append("<i>Batafsil (manba, lotlar, foyda): \u2753 Nega bu signal?</i>")
+    return "\n".join(lines)
 
 
-def format_signal_full(signal: Signal) -> str:
-    """TO'LIQ signal tafsiloti — 'Nega bu signal?' bosilganda chiqadi."""
+def format_signal_full(signal: Signal, balance: float | None = None,
+                       risk_percent: float | None = None) -> str:
+    """TO'LIQ signal tafsiloti — 'Nega bu signal?' bosilganda chiqadi.
+
+    v82: manba bloki va hajm/risk tafsiloti SHU YERDA (qisqa kartada emas).
+    """
     is_buy = signal.direction == "BUY"
     emoji = "🟢" if is_buy else "🔴"
     title = "SOTIB OLISH (BUY) SIGNALI" if is_buy else "SOTISH (SELL) SIGNALI"
@@ -406,6 +442,11 @@ def format_signal_full(signal: Signal) -> str:
         "━━━━━━━━━━━━━━━━",
         f"💰 <b>{pair}</b>   ⏱ {signal.timeframe.upper()}",
         f"🕐 <b>Kirish vaqti:</b> {format_tashkent(signal.created_at)}",
+    ]
+    _sb_top = source_block(signal)      # v82: MANBA signal tafsilotidan TEPADA
+    if _sb_top:
+        lines += _sb_top
+    lines += [
         "",
         "📍 <b>KIRISH (Entry):</b>",
         f"   <b>{fmt_price(signal.entry)}</b>",
@@ -422,9 +463,6 @@ def format_signal_full(signal: Signal) -> str:
         "📡 <b>Manba:</b>",
     ]
     lines.extend(f"   {l}" for l in strategy_vote_line(signal))
-    _sb = source_block(signal)
-    if _sb:
-        lines += _sb
 
     lines += [
         "",
@@ -434,6 +472,33 @@ def format_signal_full(signal: Signal) -> str:
 
     if signal.explanation:
         lines += ["", "🧠 <b>Nega bu signal?</b>", signal.explanation]
+
+    # v82: RISK / MONEY MANAGEMENT + har lot tafsiloti (qisqa kartadan shu yerga)
+    try:
+        from app.core.config import get_settings as _gs2
+        from app.engine import sizing as _sz2
+        _st2 = _gs2()
+        _ctr = float(getattr(_st2, "contract_size", 100.0) or 100.0)
+        _mx = float(getattr(_st2, "lot_size", 1.0) or 1.0)
+        _rp2 = float(risk_percent if risk_percent else
+                     getattr(_st2, "risk_percent", 0.5) or 0.5)
+        _bal2 = float(balance or 0.0)
+        _dist2 = abs(float(signal.entry or 0) - float(signal.sl or 0))
+        _s2 = _sz2.size_for(_bal2, _rp2, _dist2, contract=_ctr, max_lot=_mx)
+        _rmoney2 = _bal2 * _rp2 / 100.0 if _bal2 else 0.0
+        _how = (f"{_rmoney2:,.2f}$ risk \u00b7 balans {_bal2:,.2f}$" if _bal2
+                else "balans /hisob da ko'rinadi")
+        lines += [
+            "", "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+            "\u2696\uFE0F <b>RISK va HAJM (money management)</b>",
+            f"   Risk: <b>{_rp2:.2f}%</b> \u00b7 {_how}",
+            f"   Hajm: <b>{_s2['half_lot']:,.2f} + {_s2['half_lot']:,.2f} lot</b> "
+            f"(jami {_s2['lot']:,.2f} lot \u00b7 1 lot = {_ctr:,.0f} oz)",
+            f"   Lot1 +3R da, Lot2 +4R/+5R da yopiladi \u00b7 stop {fmt_price(signal.sl)}",
+        ]
+        lines += lots_entry_lines(signal, lot=float(_s2["lot"]), contract=_ctr)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[NOTIFY] to'liq karta lotlari: %s", exc)
 
     lines += [
         "",
@@ -446,6 +511,44 @@ def format_signal_full(signal: Signal) -> str:
 def format_signal(signal: Signal) -> str:
     """Eski chaqiruvlar uchun — to'liq format."""
     return format_signal_full(signal)
+
+
+def format_result_short(signal: Signal, paper_rows: list | None = None) -> str:
+    """v82: QISQA natija kartasi — faqat asosiy raqamlar + to'liq tafsilot tugmasi."""
+    won = (signal.result == "WIN")
+    be = signal.result == "BREAKEVEN"
+    icon = "\u2705" if won else ("\U0001F535" if be else "\u274C")
+    word = "YUTDI" if won else ("ZARARSIZ" if be else "YUTQAZDI")
+    pair = full_label(signal.symbol)
+    no = f"\u2116{signal.signal_no}" if signal.signal_no else "\u2116-"
+    d = signal.direction or ""
+    r = float(signal.r_multiple or 0.0)
+    lines = [
+        f"{icon} <b>SIGNAL {no} \u2014 {word}</b>",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        f"\U0001F4B0 <b>{pair}</b>  \u2022  \u23F1 {str(signal.timeframe or '').upper()}  \u2022  "
+        f"{'\U0001F7E2 BUY' if d == 'BUY' else '\U0001F534 SELL'}",
+        f"\U0001F4CC Sabab: <b>{_reason_text(signal)}</b>",
+    ]
+    if paper_rows:
+        money = 0.0
+        parts = []
+        rows_sorted = sorted(paper_rows, key=lambda q: int(getattr(q, "stage", 0) or 0))
+        for pos in rows_sorted:
+            rr = float(getattr(pos, "r_multiple", 0) or 0)
+            pnl = float(getattr(pos, "realized_pnl", 0) or 0)
+            money += pnl
+            nm = "Lot2" if int(getattr(pos, "stage", 0) or 0) >= 10 else "Lot1"
+            parts.append(f"{nm} <b>{rr:+.2f}R</b> ({pnl:+,.2f}$)")
+        lines.append("\u2696\uFE0F " + " \u00b7 ".join(parts))
+        ic = "\U0001F7E2" if money >= 0 else "\U0001F534"
+        lines.append(f"\U0001F4B5 Jami: <b>{money:+,.2f}$</b> {ic} \u00b7 Jami R: "
+                     f"<b>{r:+.2f}R</b>")
+    else:
+        lines.append(f"\U0001F4CA Natija: <b>{r:+.2f}R</b>")
+    lines.append("<i>To'liq tafsilot (qanday bo'ldi, R xarita, lotlar): pastdagi "
+                 "tugma bilan.</i>")
+    return "\n".join(lines)
 
 
 def format_result(signal: Signal, paper_rows: list | None = None) -> str:
@@ -725,8 +828,10 @@ class TelegramNotifier:
     async def send_signal(self, signal: Signal, decision=None,
                           chart_png: bytes | None = None,
                           reply_markup: InlineKeyboardMarkup | None = None) -> None:
-        # QISQA karta yuboriladi; to'liq tafsilot 'Nega?' tugmasi orqali ochiladi.
-        text = format_signal_short(signal)
+        # v82: QISQA karta; manba/lot tafsiloti faqat «Nega bu signal?» sahifasida.
+        # Hisob (balans + risk %) karta yasalishidan OLDIN olinadi.
+        _bal = 0.0
+        _risk_pct = float(getattr(self._settings, "risk_percent", 0.5) or 0.5)
         if reply_markup is None:
             from app.bot.keyboards import signal_card_kb
             reply_markup = signal_card_kb(signal.id)
@@ -750,23 +855,20 @@ class TelegramNotifier:
             logger.error("[NOTIFY] recipients 0 VA admin yo'q — #%s yuborilmadi", signal.id)
             return
 
-        # v62: lotlar necha dollardan ochilgani (birinchi foydalanuvchi hisobi bo'yicha)
+        # v82: hajm balansning risk % idan (0.5% / 1% / 2%) — hisobdan o'qiladi
         try:
             from app.paper_trading.engine import PaperEngine
             async with _session() as s2:
                 acc = await PaperEngine().get_account(s2, targets[0])
-                bal = float(getattr(acc, "balance", 0) or 0)
-                risk_pct = float(getattr(self._settings, "risk_percent", 1.0) or 1.0)
-            _lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
-            _dist = abs(float(signal.entry or 0) - float(signal.sl or 0))
-            text += "\n" + lot_money_line(bal, risk_pct, lot=_lot, risk_distance=_dist)
-            # v77: har bir lot qanchadan ochilgani - aniq narx bilan
-            _ctr = float(getattr(self._settings, "contract_size", 100.0) or 100.0)
-            for _ln in lots_entry_lines(signal, lot=_lot, contract=_ctr):
-                text += "\n" + _ln
+                _bal = float(getattr(acc, "balance", 0) or 0)
+                _rp = getattr(acc, "risk_percent", None)
+                if _rp in (None, 0):
+                    _rp = float(getattr(self._settings, "risk_percent", 0.5) or 0.5)
+                _risk_pct = float(_rp)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[NOTIFY] lot puli hisoblanmadi: %s", exc)
+            logger.debug("[NOTIFY] hisob balansi o'qilmadi: %s", exc)
 
+        text = format_signal_short(signal, balance=_bal, risk_percent=_risk_pct)
         await self._send(text, targets, reply_markup=reply_markup)
         logger.info("[NOTIFY] signal #%s %s → %d foydalanuvchiga yuborildi",
                     signal.id, signal.symbol, len(targets))
@@ -791,7 +893,8 @@ class TelegramNotifier:
         # barcha hisoblar bo'yicha qo'shilib, hisob bilan mos kelmasdi).
         main_uid = rows[0].user_id if rows else None
         own = [p for p in rows if p.user_id == main_uid] if rows else []
-        text = format_result(signal, own)
+        # v82: qisqa karta yuboriladi, to'liq tafsilot tugma bilan ochiladi
+        text = format_result_short(signal, own)
         try:
             ids = list(self._settings.admin_id_list)
             if ids and rows:
@@ -808,7 +911,12 @@ class TelegramNotifier:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[NOTIFY] hisob qatori: %s", exc)
-        await self._send(text, reply_markup=collapse_kb())
+        try:
+            from app.bot.keyboards import result_short_kb
+            _kb = result_short_kb(int(signal.id))
+        except Exception:  # noqa: BLE001
+            _kb = collapse_kb()
+        await self._send(text, reply_markup=_kb)
 
     async def send_event(self, text: str) -> None:
         await self._send(text)

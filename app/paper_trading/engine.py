@@ -93,15 +93,46 @@ class PaperEngine:
                 if risk_distance <= 0:
                     logger.warning("[PAPER] risk 0 — #%s", signal.id)
                     continue
-                # v68: HAJM fikslangan (terminaldagi kabi): 1 lot = 100 oz.
-                # Pul = narx farqi x hajm; SL urilsa shu pul yo'qoladi.
-                _lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
+                # v82: RISK/MONEY MANAGEMENT — hajm balansning risk % idan hisoblanadi
+                # (0.5% standart). SL urilsa yo'qoladigan pul = shu risk summasi.
                 _ctr = float(getattr(self._settings, "contract_size", 100.0) or 100.0)
-                qty, risk_amount = lot_position_size(risk_distance, _lot, _ctr)
+                _max_lot = float(getattr(self._settings, "lot_size", 1.0) or 1.0)
+                _rp = getattr(acc, "risk_percent", None)
+                if _rp in (None, 0):
+                    _rp = float(getattr(self._settings, "risk_percent", 0.5) or 0.5)
+                from app.engine import sizing as _sizing
+                # v82: ESKIRGAN SIGNAL — bozor narxi kirish darajasidan juda uzoq
+                # bo'lsa real brokerda ham bu narxda kirib bo'lmaydi → ochilmaydi.
+                _px_now = None
+                try:
+                    from app.services import live_state as _ls
+                    _px_now = await _ls.get_price(signal.symbol)
+                except Exception:  # noqa: BLE001
+                    _px_now = None
+                _ok_drift, _drift_why = _sizing.entry_drift_ok(
+                    signal.entry, signal.sl, _px_now, signal.direction)
+                if not _ok_drift:
+                    logger.warning("[PAPER] #%s ochilmadi: %s", signal.id, _drift_why)
+                    try:
+                        from app.services.channel_inbox import tell_admin
+                        await tell_admin(
+                            f"\u23ED <b>Signal ochilmadi (eskirgan narx)</b>\n"
+                            f"{signal.direction} {signal.symbol} #{signal.id}\n"
+                            f"{_drift_why}.\n<i>Kanal narxi bilan bozor narxi mos emas — "
+                            f"yolg'on natija yozilmasin deb hisob ochilmadi.</i>")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                _sz = _sizing.size_for(
+                    float(acc.balance or 0.0), float(_rp), risk_distance,
+                    contract=_ctr, max_lot=_max_lot,
+                )
+                qty = float(_sz["qty_oz"])
+                risk_amount = float(_sz["half_risk"]) * 2.0
                 if qty <= 0:
                     continue
-                half_q = qty / 2.0
-                half_r = risk_amount / 2.0
+                half_q = float(_sz["half_qty"])
+                half_r = float(_sz["half_risk"])
                 tp4 = r_price(signal.direction, float(signal.entry), float(signal.sl), 4)
                 tp5 = r_price(signal.direction, float(signal.entry), float(signal.sl), 5)
                 common = dict(
@@ -122,9 +153,10 @@ class PaperEngine:
                 ))
                 opened += 2
                 logger.info(
-                    "[PAPER] user %s 2 lot #%s hajm=%.2f+%.2f lot "
-                    "(1 lot = %.0f oz; SL gacha %.2f$)",
-                    uid, signal.id, half_q / _ctr, half_q / _ctr, _ctr, risk_amount)
+                    "[PAPER] user %s 2 lot #%s hajm=%.2f+%.2f lot risk=%.2f%% "
+                    "(%.2f$ / balans %.2f$; SL gacha %.2f$)",
+                    uid, signal.id, half_q / _ctr, half_q / _ctr, _sz["risk_pct"],
+                    _sz["risk_money"], float(acc.balance or 0.0), risk_amount)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[PAPER] user %s uchun bitim ochilmadi: %s", uid, exc)
         if opened:

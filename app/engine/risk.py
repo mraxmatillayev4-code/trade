@@ -190,6 +190,24 @@ def build_r_map(entry: float, sl: float, tp1: float, tp2: float, tp3: float) -> 
     )
 
 
+def lot_target_r(stage: int | str | None) -> float:
+    """v82: lot maqsadi R da — Lot2 = +5R (yakuniy), Lot1 = +3R."""
+    try:
+        return 5.0 if int(stage or 0) >= 10 else 3.0
+    except Exception:  # noqa: BLE001
+        return 3.0
+
+
+def lot_target_price(pos) -> float:
+    """v82: shu LOT uchun maqsad NARXI (R asosida, tp maydonlaridan qat'i nazar)."""
+    d = str(getattr(pos, "direction", "") or "").upper()
+    entry = float(getattr(pos, "entry", 0) or 0)
+    sl = float(getattr(pos, "sl", 0) or 0)
+    if d not in ("BUY", "SELL") or entry <= 0 or sl <= 0:
+        return 0.0
+    return r_price(d, entry, sl, int(lot_target_r(getattr(pos, "stage", 0))))
+
+
 def r_price(direction: Direction | str, entry: float, sl: float, n: int) -> float:
     """Kirish/SL dan nR narx (yangi ustun yo'q — hisoblanadi)."""
     risk = abs(entry - sl)

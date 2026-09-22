@@ -105,9 +105,10 @@ class Settings(BaseSettings):
     tp1_r: float = 1.0
     tp2_r: float = 2.0
     tp3_r: float = 3.0
-    risk_percent: float = 1.0
+    # v82: risk/money management — hajm balansning shu foizidan hisoblanadi
+    risk_percent: float = 0.5
     # === v68: HAJM (lot) va pul hisobi — terminaldagi kabi ===
-    lot_size: float = 1.0                 # signal uchun jami hajm (lot); 2 lotga bo'linadi
+    lot_size: float = 1.0                 # v82: hajm uchun YUQORI chegara (max lot)
     contract_size: float = 100.0          # 1 lot XAU = 100 oz (pul = narx farqi x 100 x lot)
     paper_initial_balance: float = 10_000.0
 
