@@ -41,8 +41,11 @@ def build_text(cmds: list[str] | None = None) -> str:
         "har 48 soatda avto-zaxira (23:00).",
         "\u2022 \U0001F5D1 <b>Kanal o'chirish</b> \u2014 bir bosishda o'chadi "
         "(\u21A9\uFE0F Qaytarish bor).",
-        "\u2022 Faqat SIGNALLAR o'qiladi: grafik/terminal skrinshotlari signal emas "
-        "\u2014 matnda to'liq reja (yo'nalish + SL/TP) bo'lishi kerak.",
+        "\u2022 <b>Faqat HAQIQIY signallar</b> o'qiladi: matnda ANIQ narx "
+        "(masalan 4394.37 yoki 4290-4295 zona) bo'lishi shart.",
+        "\u2022 Signal EMAS: dars/kurs/vebinar postlari, tahlil-so'rov, rasm "
+        "skrinshotlari, \u00ABbuy now\u00BB kabi darajasiz chaqiruvlar "
+        "(narx yozilmagan), natija/maqtov postlari va kontekstdan olingan raqamlar.",
         "\u2022 SIGNAL kartasi QISQA; manba, lotlar va foyda hisobi \u00AB\u2753 Nega bu "
         "signal?\u00BB sahifasida.",
         "\u2022 Natija (WIN/LOSE) kartasi ham qisqa \u2014 to'liq tafsilot \u00AB\U0001F4D6 To'liq "
@@ -53,8 +56,10 @@ def build_text(cmds: list[str] | None = None) -> str:
         "brokerdagidek.",
         "\u2022 Eski/kechikkan signal (narx kirishdan uzoq) ochilmaydi \u2014 yolg'on "
         "natija yozilmasin.",
-        "\u2022 Akkaunt va kanallar ZAXIRADA (/zaxira) \u2014 yangilanishdan keyin qayta "
-        "ulash shart emas.",
+        "\u2022 Akkaunt va kanallar ZAXIRADA: /zaxira \u2014 zaxira fayli buyruq "
+        "berilganda, startupda va <b>har 24 soatda shu chatga avtomatik</b> yuboriladi.",
+        "\u2022 Baza almashib ketsa ham: faylni botga yuboring \u2014 akkaunt va kanallar "
+        "o'zi tiklanadi (qayta ulash shart emas).",
         "\u2022 O'tgan signallar haqidagi maqtov/natija postlari SIGNAL EMAS.",
         "\u2022 Bozor kuzatuvi aniq: sham yetib kelmasa yoki narx to'xtasa \u2014 "
         "darhol ogohlantirish keladi.",

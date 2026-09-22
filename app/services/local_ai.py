@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-82"
+__version__ = "SINO-LAI-83"
 
 import difflib
 import re
@@ -489,6 +489,34 @@ def _label_of(tok: str) -> tuple[str, int]:
     return "", 0
 
 
+_MONTH_RE = re.compile(
+    r"(yanvar|fevral|mart|aprel|may|iyun|iyul|avgust|sentabr|sentyabr|oktabr|oktyabr|"
+    r"noyabr|dekabr|january|february|march|april|june|july|august|september|october|"
+    r"november|december|\u044f\u043d\u0432\u0430\u0440|\u0444\u0435\u0432\u0440\u0430\u043b|"
+    r"\u043c\u0430\u0440\u0442|\u0430\u043f\u0440\u0435\u043b|\u0438\u044e\u043d|"
+    r"\u0438\u044e\u043b|\u0430\u0432\u0433\u0443\u0441\u0442|\u0441\u0435\u043d\u0442\u044f\u0431\u0440|"
+    r"\u043e\u043a\u0442\u044f\u0431\u0440|\u043d\u043e\u044f\u0431\u0440|\u0434\u0435\u043a\u0430\u0431\u0440)", re.I)
+_DATE_NUM_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[./-]\s*(\d{1,2})(?!\d)")
+
+
+def _is_date_pair(tok: str) -> bool:
+    """v83: '25.09' / '25-09' = SANA. '57-61' / '10-13' = narx zonasi (sana emas)."""
+    m = re.fullmatch(r"(\d{1,2})\s*[./-]\s*(\d{1,2})", str(tok or ""))
+    if not m:
+        return False
+    d, mo = int(m.group(1)), int(m.group(2))
+    return 1 <= d <= 31 and 1 <= mo <= 12 and len(m.group(2)) <= 2
+# v83: "now/hozir/otkat/kirdim/aktiv" — shu belgilar bo'lsa darajasiz qisqa chaqiruv bo'ladi
+_TRIG_NOW = re.compile(r"\b(now|hozir|tez|shoshil|otkat|otk\w*|kirdim|kiraman|kirdi|aktiv|"
+                       r"market|bozor\s*narx|istalgan\s*narx)\b", re.I)
+# v83: dars/kurs/maqtov/tahlil-so'rov postlari — SIGNAL EMAS
+_V_COMMENT = re.compile(
+    r"(dars|darslar|darsni|kurs(lar)?\b|vebinar|vebinary|marafon|konkurs|sovg|sovga|"
+    r"shogird|o\u2018quvchi|oquvchi|talaba|reyting|reytingi|obuna|obunach|kanalga\s*qos|"
+    r"tahlil|analiz|analysis\b|idea\b|ideya|fikr|savol|soraganlar|sorov|javob\s*ber|"
+    r"reja\s*qil|rejalashtir|yoziling|qatnash|bepul\s*dars|master.?klas|bootcamp)",
+    re.I)
+
 _DATE_TOK = {"yil", "year", "sana", "kun", "vaqt", "daqiqa", "minut", "soat",
              "yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust",
              "sentabr", "sentabr", "oktabr", "noyabr", "dekabr", "января", "февраля"}
@@ -496,7 +524,8 @@ _DATE_TOK = {"yil", "year", "sana", "kun", "vaqt", "daqiqa", "minut", "soat",
 
 def _collect_levels(toks: list[str], anchor: float | None) -> dict:
     """Tokenlar oqimidan entry / sl / tp larni yig'adi."""
-    out: dict = {"entry": None, "zone": None, "sl": None, "tps": [], "free": [], "nums": []}
+    out: dict = {"entry": None, "zone": None, "sl": None, "tps": [], "free": [],
+                 "nums": [], "short": []}   # v83: "short" — faqat shu raqamlar 43xx ga kengaytiriladi
     cur, cur_i, budget = "", 0, 0
     yearish = any(t in _DATE_TOK for t in toks)
     skip_next = False
@@ -521,8 +550,18 @@ def _collect_levels(toks: list[str], anchor: float | None) -> dict:
         if tok.startswith("+") or (i + 1 < len(toks) and toks[i + 1] in _UNIT_TOK):
             budget = max(0, budget - 1)
             continue
+        # v83: sana/vaqt raqamlari daraja EMAS ("25-sentabr", "25.09", "25 kun")
+        if _MONTH_RE.search(tok) or _is_date_pair(tok):
+            budget = max(0, budget - 1)
+            continue
+        _nxt = " ".join(toks[i + 1:i + 3]).lower()
+        _is_date_ahead = bool(_MONTH_RE.search(_nxt)) or any(
+            t in _DATE_TOK for t in toks[i + 1:i + 3])
         rng = _range_pair(tok)
         v = None if rng else _numval(tok)
+        if v is not None and v <= 31.0 and _is_date_ahead:
+            budget = max(0, budget - 1)
+            continue
         if (v is None and rng is None and cur and i + 1 < len(toks)
                 and re.fullmatch(r"\d{1,2}", tok) and re.fullmatch(r"\d{3}", toks[i + 1])):
             v = float(tok + toks[i + 1])       # "entry 4 415" -> 4415
@@ -549,6 +588,15 @@ def _collect_levels(toks: list[str], anchor: float | None) -> dict:
             cur = ""
             budget = 0
             continue
+        # v83: 3 xonali raqamlar (400+) — haqiqiy narx; 1-2 xonalilar faqat
+        #       label/diapazon yonida bo'lsa "short" (43xx ga kengaytiriladi)
+        for _v in vals:
+            if _v is None:
+                continue
+            if _v >= 400:
+                out["short"].append(_v)              # to'liq narx — kengaytirish shart emas
+            elif rng is not None or cur in ("entry", "sl", "tp"):
+                out["short"].append(_v)              # qisqa zona ("57-61 buy otkat")
         if cur == "entry":
             if len(vals) == 2 or (out["zone"] is None and len(vals) == 2):
                 lo, hi = min(vals), max(vals)
@@ -576,7 +624,73 @@ def _collect_levels(toks: list[str], anchor: float | None) -> dict:
     return out
 
 
-def _fix_levels(levels: dict, symbol: str, ref: float | None) -> dict:
+_PIP_RE = re.compile(r"(\d{1,4}(?:\.\d)?)\s*(?:pip|pips|punkt|p)\b", re.I)
+
+
+def _pip_numbers(text: str) -> tuple[float | None, list[float]]:
+    """«Stoploss 10pips», «Tp1 - 80 pips», «sl 15 pip» -> (sl_pips, [tp_pips])."""
+    t = _pre(text or "")
+    sl = None
+    tps: list[float] = []
+    for m in re.finditer(
+            r"(sl|stop\s*loss|stop|stoploss|zarar|slga)[^\d\n]{0,12}(\d{1,4}(?:\.\d)?)",
+            t, re.I):
+        try:
+            sl = float(m.group(2))
+        except ValueError:
+            continue
+    for m in re.finditer(
+            r"(tp\s*\d?|target|maqsad|nishon)[^\d\n]{0,12}(\d{1,4}(?:\.\d)?)\s*(?:pip|pips|punkt)?",
+            t, re.I):
+        try:
+            v = float(m.group(2))
+        except ValueError:
+            continue
+        if v not in tps:
+            tps.append(v)
+    if sl is None or not tps:
+        # «Tp1 - 80 pips RR 1:8 ... Stoploss 10pips» kabi yozuv
+        vals = [float(x) for x in _PIP_RE.findall(t or "")]
+        if vals:
+            if sl is None:
+                sl = min(vals)
+            tps = [v for v in vals if v != sl] or tps
+    return sl, tps
+
+
+def _pip_levels(text: str, direction: str, ref: float | None) -> dict | None:
+    """Pips rejasi (mutlaq narx yozilmagan) -> narx darajalari (ref dan).
+
+    XAU uchun 1 pip = 1.00$ (oltin skalyorlari shu birlikda yozadi).
+    Faqat ref (joriy narx) ma'lum bo'lsa hisoblanadi.
+    """
+    if ref is None or str(direction or "").upper() not in ("BUY", "SELL"):
+        return None
+    if not re.search(r"\bpip|punkt", str(text or ""), re.I):
+        return None
+    sl_p, tp_p = _pip_numbers(text)
+    if not sl_p or not tp_p:
+        return None
+    r = float(ref)
+    sgn = -1.0 if str(direction).upper() == "BUY" else 1.0
+    sl = r + sgn * float(sl_p)
+    tps = [r - sgn * float(x) for x in tp_p[:3]]
+    dist = abs(r - sl)
+    if not (0.05 <= dist <= 60.0):
+        return None
+    return {"entry": r, "sl": sl, "tps": tps}
+
+
+def _pip_plan_ok(text: str, direction: str | None) -> bool:
+    """Pips rejasi bormi (yo'nalish + SL/Tp pips bilan yozilgan)."""
+    if not direction:
+        return False
+    sl_p, tp_p = _pip_numbers(text)
+    return bool(sl_p and tp_p)
+
+
+def _fix_levels(levels: dict, symbol: str, ref: float | None,
+                allow_expand: bool = True) -> dict:
     """Qisqa yozuvlarni to'ldirish va diapazondan tashqarisini tashlash."""
     lo, hi = _band(symbol)
     anchor = ref
@@ -585,6 +699,15 @@ def _fix_levels(levels: dict, symbol: str, ref: float | None) -> dict:
             anchor = x
     def _ok(v):
         return v is not None and lo <= v <= hi
+
+    _short_set = set()
+    for _v in (levels.get("short") or []):
+        if _v is not None:
+            _short_set.add(float(_v))
+
+    def _can_expand(v) -> bool:
+        """v83: faqat shu xabardagi aniq "short" raqam kengaytiriladi."""
+        return bool(allow_expand) and v is not None and float(v) in _short_set
 
     def _repair(v):
         if v is None or _ok(v):
@@ -601,15 +724,14 @@ def _fix_levels(levels: dict, symbol: str, ref: float | None) -> dict:
         return None
 
     entry = _repair(levels["entry"])
-    if entry is None and levels["entry"] is not None:
-        entry = _expand_short(levels["entry"], anchor)
-        entry = _repair(entry)
+    if entry is None and levels["entry"] is not None and _can_expand(levels["entry"]):
+        entry = _repair(_expand_short(levels["entry"], anchor))
     zone = levels["zone"]
     if zone:
         a, b = _repair(zone[0]), _repair(zone[1])
-        if a is None:
+        if a is None and _can_expand(zone[0]):
             a = _expand_short(zone[0], anchor)
-        if b is None:
+        if b is None and _can_expand(zone[1]):
             b = _expand_short(zone[1], anchor)
         if a and b and (lo <= a <= hi) and (lo <= b <= hi) and abs(a - b) / max(a, b) <= 0.03:
             zone = (min(a, b), max(a, b))
@@ -620,15 +742,14 @@ def _fix_levels(levels: dict, symbol: str, ref: float | None) -> dict:
     tps = []
     for t in levels["tps"]:
         t2 = _repair(t)
-        if t2 is None and t is not None:
-            t2 = _expand_short(t, anchor)
-            t2 = _repair(t2)
+        if t2 is None and t is not None and _can_expand(t):
+            t2 = _repair(_expand_short(t, anchor))
         if t2 and t2 not in tps:
             tps.append(t2)
     free = []
     for v in levels["free"]:
         x = _repair(v)
-        if x is None:
+        if x is None and _can_expand(v):
             x = _repair(_expand_short(v, anchor))
         if x and x not in free:
             free.append(x)
@@ -887,6 +1008,9 @@ def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     _v62 = _result_veto(t, has_plan) or _result_veto(raw or "", has_plan)
     if _v62:
         return _v62
+    # v83: dars/kurs/vebinar/tahlil-so'rov postlari — SIGNAL EMAS (reja bo'lsa ham)
+    if _V_COMMENT.search(t) and not _V_RESULT_ONLY_OK(t):
+        return "dars/tahlil/izoh posti (signal emas)"
     if _V_WARN.search(t):
         return "firibgarlik ogohlantirishi/reklama"
     if _SOFT_COMMENT.search(t) and not has_plan:
@@ -909,6 +1033,15 @@ def _veto(text: str, raw: str, has_plan: bool, strong_dir: bool) -> str:
     if _V_GREET.search(t) and not has_plan and not _num_count(t):
         return "salomlashish posti"
     return ""
+
+
+def _V_RESULT_ONLY_OK(t: str) -> bool:
+    """Dars so'zi bo'lsa ham aniq SL+TP reja bo'lsa signal bo'lishi mumkin.
+
+    (masalan: "M30 XAUUSD dars: 4397.23 sell, SL 4401, TP 4390")
+    """
+    return bool(re.search(r"\bsl\b|stop\s*loss|stop\b", t or "", re.I)
+                and re.search(r"\btp\d?\b|take\s*profit|maqsad|target", t or "", re.I))
 
 
 def _num_count(t: str) -> int:
@@ -1050,8 +1183,19 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     if symbol is None:
         return None, "juftlik/aktiv ko'rinmadi", False
 
-    lv = _fix_levels(levels_raw, symbol, ref)
+    # v83: qisqa raqamlar (57-61) FAQAT yo'nalish bo'lsa 43xx ga kengaytiriladi
+    _allow_expand = bool(direction or bu_s or se_s)
+    _had_local = bool(levels_raw["entry"] or levels_raw["zone"] or levels_raw["sl"]
+                      or levels_raw["tps"] or levels_raw["short"])
+    lv = _fix_levels(levels_raw, symbol, ref, allow_expand=_allow_expand)
     entry, zone, sl, tps = lv["entry"], lv["zone"], lv["sl"], lv["tps"]
+    # v83: pips rejasi (mutlaq narx yo'q) — joriy narxdan hisoblanadi
+    _pip_from_ref = False
+    if not (entry or zone or sl or tps):
+        _pl = _pip_levels(raw, direction, ref)
+        if _pl:
+            entry, sl, tps = _pl["entry"], _pl["sl"], _pl["tps"]
+            _pip_from_ref = True
 
     # yo'nalishsiz raqamlar: entry bo'sh bo'lsa birinchi mantiqiy raqam
     if entry is None and lv["free"]:
@@ -1084,6 +1228,33 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
     veto = _veto(body, raw, bool(entry or zone or sl), bool(direction or geom))
     if veto:
         return None, veto, True
+
+    # v83: DARAJASI YO'Q xabarlar signal emas (kontekstdan entry o'ylab topilmaydi).
+    # Faqat aniq chaqiruv bo'lsa: "buy now", "sell otkat", "buy kirdim".
+    _has_any_level = bool(entry or zone or sl or tps)
+    _pip_ok = _pip_plan_ok(raw, direction or geom)
+    if not _has_any_level and _pip_ok:
+        _has_any_level = True      # pips rejasi: darajalar joriy narxdan olinadi
+    if not _has_any_level:
+        _trig = bool(_TRIG_NOW.search(body)) and bool(direction or geom)
+        _short_call = _trig and _had_local and len(toks) <= 10
+        if not _short_call:
+            return None, ("daraja yo'q (matn/izoh) — signal emas"
+                          if not _had_local else
+                          "raqamlar daraja emas (sana/izoh)"), True
+        entry = None
+    elif not _had_local and not _pip_from_ref and not _pip_ok:
+        # daraja faqat kontekstdan chiqqan — signal emas
+        return None, "daraja xabarda yo'q (kontekstdan) — signal emas", True
+
+    # v83: faqat qisqa belgi (43xx kontekstdan kengaytirilgan) + kuchsiz yo'nalish = EMAS
+    _real_num = any((float(_v) or 0) >= 400 for _v in (levels_raw.get("short") or []))
+    if not _real_num and score < 3.0 and not _pip_ok:
+        return None, "narx yozilmagan (faqat qisqa belgi) — signal emas", True
+
+    # v83: uzun matn + reja yo'q = maqola/izoh
+    if len(toks) >= 14 and not sl and not tps and not (entry or zone) and not _pip_ok:
+        return None, "uzun matn, aniq reja yo'q — signal emas", True
 
     direction = direction or geom
     has_levels = bool(entry or zone or sl or tps)
@@ -1150,6 +1321,43 @@ def analyze_ex(text: str | None, ocr: str = "", has_image: bool = False,
               f"tp={tps[:4]} zona={zone}")
     logger.info("[LAI] %s | %s", reason, body[:90])
     return sig, reason, False
+
+
+def strict_check(raw: str | None, parsed=None, *, ref: float | None = None) -> str:
+    """v83: OXIRGI DARVOZA — qaysi parser ishlatganidan qat'i nazar bir xil qoida.
+
+    Sabab qaytarsa — xabar SIGNAL EMAS (kanalga yozilmaydi, hisobga o'tadi).
+    """
+    t = str(raw or "").strip()
+    if not t:
+        return "bo'sh xabar"
+    try:
+        body = _pre(t)
+        _v = _result_veto(t, False)
+        if _v:
+            return _v
+        if _V_COMMENT.search(body) and not _V_RESULT_ONLY_OK(body):
+            return "dars/tahlil/izoh posti (signal emas)"
+        if _V_WARN.search(body):
+            return "firibgarlik ogohlantirishi/reklama"
+        if _V_AD.search(body) and not _full_plan(t):
+            return "reklama/obuna posti"
+        if _V_CLOSE.search(body) and not _full_plan(t):
+            return "yopish xabari"
+        if _V_GREET.search(body) and not _num_count(body):
+            return "salomlashish posti"
+        toks = [x for x in body.split() if x]
+        _d, _sc, _st, _why, _b, _s = _direction(toks, t)
+        _pdir = str(getattr(parsed, "direction", "") or "").upper()
+        if not (_d or _pdir in ("BUY", "SELL") or _b or _s):
+            return "yo'nalish yo'q — signal emas"
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", body)]
+        _real = [x for x in nums if 400.0 <= x <= 9000.0]
+        if not _real and not _pip_plan_ok(t, _d or _pdir):
+            return "narx yozilmagan (faqat so'z/emoji) — signal emas"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[LAI] strict_check: %s", exc)
+    return ""
 
 
 def analyze(text: str | None, ocr: str = "", has_image: bool = False,

@@ -60,6 +60,29 @@ _boot_sent = False
 _sig_sent = False
 
 
+def get_diag() -> dict:
+    """v83: kanal bo'yicha hisob (ko'rildi / signal / signal emas + oxirgi sabab)."""
+    try:
+        return {str(k): dict(v) for k, v in (_DIAG or {}).items()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def reject_reasons(limit: int = 8) -> list[str]:
+    """v83: oxirgi rad etilgan xabarlar sabablari («nima uchun signal emas»)."""
+    out: list[str] = []
+    try:
+        for _k, d in (get_diag() or {}).items():
+            whys = list(d.get("why") or [])
+            smp = list(d.get("smp") or [])
+            if not whys:
+                continue
+            out.append(f"{d.get('name') or _k}: {whys[0][:70]} | {smp[0][:60] if smp else ''}")
+    except Exception:  # noqa: BLE001
+        pass
+    return out[:limit]
+
+
 def _ver_info() -> str:
     """Versiya + muhit haqida qisqa ma'lumot (admin xabariga)."""
     try:
@@ -90,8 +113,10 @@ async def _diag(key, src: str, kind: str, reason: str = "", sample: str = "") ->
         now = _t.time()
         d = _DIAG.setdefault(str(key or src or "?"), {
             "read": 0, "sig": 0, "emas": 0, "err": 0, "skip": 0,
-            "why": [], "smp": [], "ts": now,
+            "why": [], "smp": [], "ts": now, "name": str(src or ""),
         })
+        if src and not d.get("name"):
+            d["name"] = str(src)
         d["read"] += 1
         if kind in ("sig", "emas", "err", "skip"):
             d[kind] += 1
@@ -693,6 +718,18 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                     "[CH] AI zaxira OK: %s %s entry=%s",
                     parsed.direction, parsed.symbol, parsed.entry,
                 )
+
+        # v83: OXIRGI DARVOZA — parser nima topgan bolsa ham, faqat haqiqiy signal
+        if parsed is not None and parsed.direction and parsed.symbol:
+            try:
+                from app.services.local_ai import strict_check as _strict
+                _gate = _strict(raw or text or "", parsed,
+                                ref=_last_px(getattr(parsed, "symbol", None)))
+                if _gate:
+                    parsed = None
+                    ai_reason = _gate
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CH] strict gate: %s", exc)
 
         is_sig = parsed is not None and parsed.direction and parsed.symbol
         if not is_sig:

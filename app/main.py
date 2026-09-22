@@ -101,7 +101,8 @@ class Application:
                 logger.info("[AI-WEB] internet xotirasi tayyor")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AI-WEB] xotira: %s", exc)
-        # v82: akkaunt va kanallar zaxirasi — yangilanishdan keyin qayta ulanmaslik
+        # v82/v83: akkaunt va kanallar zaxirasi — yangilanishdan keyin qayta ulanmaslik
+        self.persist_ok = False
         try:
             from app.services import persist
             fixed = await persist.restore_if_missing()
@@ -111,6 +112,7 @@ class Application:
                 except Exception:  # noqa: BLE001
                     pass
             await persist.save_guard()
+            self.persist_ok = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("[PERSIST] guard: %s", exc)
 
@@ -137,6 +139,29 @@ class Application:
             live_state.set_price_provider(self.price_for)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[PX] live_state: %s", exc)
+
+        # v83: bot tayyor bo'lgach — bo'sh baza bo'lsa ogohlantirish, keyin avto-zaxira
+        async def persist_tasks() -> None:
+            """v83: zaxira faylini Telegramga yuborish (startup + har 24 soat)."""
+            from app.services import persist
+            await asyncio.sleep(15)
+            try:
+                warn = await persist.warn_if_empty(self.notifier)
+                if warn and self.notifier is not None:
+                    await self.notifier.send_admin(warn)
+                else:
+                    snap = await persist.snapshot()
+                    if snap.get("session") or snap.get("channels"):
+                        await persist.send_backup(
+                            self.notifier,
+                            note="\U0001F510 <b>ZAXIRA NUSXA</b> (startup)",
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[PERSIST] startup zaxira: %s", exc)
+            try:
+                await persist.auto_loop(self.notifier)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[PERSIST] avto-loop: %s", exc)
 
         if self.settings.bot_token:
             self.bot = Bot(
@@ -375,6 +400,8 @@ class Application:
 
         self._scheduler_tasks.append(asyncio.create_task(db_backup_loop(), name="db-backup"))
         self._scheduler_tasks.append(asyncio.create_task(watch_guard(), name="watch-guard"))
+        # v83: zaxira faylini Telegramga yuborish (startup + har 24 soat)
+        self._scheduler_tasks.append(asyncio.create_task(persist_tasks(), name="persist-backup"))
         logger.info(
             "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC "
             "(%02d:00 Toshkent), muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",

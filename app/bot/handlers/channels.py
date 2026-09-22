@@ -531,6 +531,34 @@ async def channel_status(message: Message) -> None:
     rec_txt = "\n".join(f"• {x}" for x in rec[:12]) or "—"
     ok = ", ".join(st.get("channels_ok") or []) or "—"
     fail = ", ".join(st.get("channels_fail") or []) or "—"
+    # v83: kanal bo'yicha hisob (ko'rildi / signal / signal emas) + oxirgi rad sababi
+    _st_lines: list[str] = []
+    try:
+        from datetime import date as _d, timedelta as _td
+        from app.database.session import async_session_factory as _asf
+        from app.services import channel_inbox as _ci
+        from app.services.channel_store import read_stats_for_days as _rst
+        _from = (_d.today() - _td(days=7)).isoformat()
+        async with _asf() as _s:
+            _st = await _rst(_s, _from, _d.today().isoformat())
+        _by = (_st or {}).get("by") or {}
+        if _by:
+            _st_lines.append("\U0001F4CA <b>7 kunlik hisob</b> (ko'rildi / signal / emas):")
+            for _k, _r in list(_by.items())[:8]:
+                _st_lines.append(
+                    f"   • {str(_r.get('name') or _k)[:24]}: "
+                    f"{int(_r.get('seen') or 0)} / <b>{int(_r.get('signal') or 0)}</b> / "
+                    f"{int(_r.get('emas') or 0)}"
+                )
+        _rr = _ci.reject_reasons(6)
+        if _rr:
+            _st_lines.append("\U0001F6AB <b>Nega signal emas</b> (oxirgi sabablar):")
+            for _x in _rr:
+                _st_lines.append(f"   • {_x[:96]}")
+    except Exception as _exc:  # noqa: BLE001
+        _st_lines.append(f"\u26a0\ufe0f hisob olinmadi: {type(_exc).__name__}")
+    _st_txt = ("\n".join(_st_lines) + "\n") if _st_lines else ""
+
     await message.answer(
         "🔎 <b>KANAL KUZATUVI</b>\n"
         "━━━━━━━━━━━━━━━━\n"
@@ -541,6 +569,7 @@ async def channel_status(message: Message) -> None:
         f"✅ O'qiladi: {ok}\n"
         f"⚠️ Topilmadi: {fail}\n"
         f"Xato: {st.get('last_error') or '—'}\n"
+        + _st_txt +
         "━━━━━━━━━━━━━━━━\n"
         "<b>Ishonchli yo'l:</b> kanal xabarini shu botga <b>forward</b> qiling.\n"
         "Bot kanalga admin bo'lishi shart emas.\n\n"
@@ -1090,6 +1119,18 @@ async def _login_done(message: Message, state=None) -> None:
         logger.warning("[AKKAUNT] kanal ro'yxati: %s", exc)
 
 
+async def _send_backup_after_login(bot=None) -> None:
+    """v83: akkaunt ulangach zaxira faylini darhol chatga yuboradi."""
+    try:
+        from app.services import persist as _persist
+        await _persist.send_backup(
+            None, note="\U0001F510 <b>ZAXIRA NUSXA</b> (akkaunt ulandi)", bot=bot)
+
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH] zaxira (login): %s", exc)
+
+
 async def _qr_loop(message: Message, msg=None, state=None) -> None:
     """Havolani bitta xabarni TAHRIRLAB yangilab turadi va tasdiqni kutadi."""
     from app.services.channel_user import qr_active, qr_step
@@ -1108,6 +1149,7 @@ async def _qr_loop(message: Message, msg=None, state=None) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             await _login_done(message, state)
+            await _send_backup_after_login(message.bot)
             return
         if state_name == "password":
             _login_tmp[uid] = {"step": "qr2fa"}
@@ -1134,12 +1176,37 @@ async def account_qr(message: Message, state) -> None:
     if not _is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Faqat admin akkaunt ulaydi.")
         return
-    from app.services.channel_user import qr_begin
+    from app.services.channel_user import credentials, qr_begin
+    uid = message.from_user.id
+    api_id, api_hash, _sess = await credentials()
+    if not api_id or not api_hash:
+        try:
+            from app.services import persist as _persist
+            await _persist.restore_if_missing()
+            api_id, api_hash, _sess = await credentials()
+        except Exception:  # noqa: BLE001
+            pass
+    if not api_id or not api_hash:
+        _login_tmp[uid] = {"step": "api_id", "next": "qr"}
+        try:
+            await state.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        await message.answer(
+            "🔑 <b>api_id / api_hash kerak</b> (bir marta kiritiladi va "
+            "zaxiraga saqlanadi — keyingi yangilanishlarda yo'qolmaydi).\n\n"
+            "Qayerdan olinadi: <b>my.telegram.org</b> → "
+            "<b>API development tools</b> → <b>api_id</b> va <b>api_hash</b>.\n\n"
+            "📩 Endi <b>api_id</b> ni (raqam) yuboring — keyin api_hash "
+            "so'raladi va <b>QR avtomatik chiqadi</b>.\n"
+            "🚫 Bekor qilish: <b>bekor</b>",
+            parse_mode="HTML",
+        )
+        return
     res = await qr_begin()
     if res.get("err"):
         await message.answer("⚠️ " + str(res["err"]), parse_mode="HTML")
         return
-    uid = message.from_user.id
     await state.clear()
     _login_tmp[uid] = {"step": "qr"}
     first = await _qr_send(message, str(res.get("link") or ""), res.get("qr"))
@@ -1177,6 +1244,11 @@ async def account_wizard(message: Message, state) -> None:
     step = tmp.get("step")
     t = (message.text or "").strip()
     try:
+        if t.lower().strip() in {"bekor", "orqaga", "yo'q", "cancel"}:
+            _login_tmp.pop(uid, None)
+            await state.clear()
+            await message.answer("Bekor qilindi. /qr yoki /akkaunt bilan qayta boshlang.")
+            return
         if step == "api_id":
             raw = _only_digits(t)
             if len(raw) < 5:
@@ -1195,6 +1267,33 @@ async def account_wizard(message: Message, state) -> None:
                 await message.answer("api_hash juda qisqa. Qayta yuboring.")
                 return
             tmp["api_hash"] = h
+            from app.services.channel_user import save_api as _save_api
+            try:
+                await _save_api(int(tmp.get("api_id") or 0), h)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CH] api saqlash: %s", exc)
+            try:
+                from app.services import persist as _persist2
+                await _persist2.save_guard()
+            except Exception:  # noqa: BLE001
+                pass
+            if str(tmp.get("next") or "") == "qr":
+                tmp["step"] = "qr"
+                await message.answer(
+                    "✅ api_id/api_hash saqlandi (zaxiraga ham yozildi).\n"
+                    "🔳 QR tayyorlanmoqda...",
+                    parse_mode="HTML",
+                )
+                from app.services.channel_user import qr_begin as _qb
+                _res2 = await _qb()
+                if _res2.get("err"):
+                    await message.answer("⚠️ " + str(_res2["err"]),
+                                         parse_mode="HTML")
+                    return
+                _first2 = await _qr_send(message, str(_res2.get("link") or ""),
+                                         _res2.get("qr"))
+                await _qr_loop(message, _first2, state)
+                return
             tmp["step"] = "phone"
             await message.answer(
                 "✅ api_hash qabul.\n\n"

@@ -86,6 +86,12 @@ async def _save(session: AsyncSession, channels: list[dict]) -> None:
     else:
         session.add(SystemLog(level="INFO", component=COMPONENT, message=payload))
     await session.commit()
+    # v83: kanallar ro'yxati o'zgardi — zaxira guard ham darhol yangilanadi
+    try:
+        from app.services import persist as _persist
+        await _persist.save_guard()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[PERSIST] guard (kanallar): %s", exc)
 
 
 def _same(ch: dict, *, username: str | None, chat_id: int | None) -> bool:

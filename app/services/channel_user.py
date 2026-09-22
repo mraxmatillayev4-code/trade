@@ -242,6 +242,14 @@ async def save_session(session_str: str) -> None:
         await save_json_log(db, SESSION_COMPONENT, {"session": session_str})
         await save_json_log(db, PENDING_COMPONENT, {})
 
+    # v83: sessiya saqlanishi bilan zaxira guard ham yangilanadi
+    try:
+        from app.services import persist as _persist
+        await _persist.save_guard()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[PERSIST] guard (sessiya): %s", exc)
+
+
 
 async def clear_session() -> None:
     async with async_session_factory() as db:
@@ -584,7 +592,18 @@ async def qr_begin() -> dict:
     global _qr_client, _qr_obj, _qr_state
     api_id, api_hash, _sess = await credentials()
     if not api_id or not api_hash:
-        return {"err": "api_id/api_hash yo'q. Avval /akkaunt bilan ularni kiriting.",
+        # v83: zaxira (guard) dan avtomatik tiklashga urinib ko'ramiz
+        try:
+            from app.services import persist as _persist
+            await _persist.restore_if_missing()
+            api_id, api_hash, _sess = await credentials()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[QR] guard tiklash: %s", exc)
+    if not api_id or not api_hash:
+        return {"err": ("api_id/api_hash yo'q. Ularni 2 qadamda kiritamiz "
+                        "(/qr yoki /akkaunt) yoki Render sozlamalarida "
+                        "TELEGRAM_API_ID va TELEGRAM_API_HASH ni qo'ying "
+                        "(my.telegram.org -> API development tools)."),
                 "link": "", "qr": None}
     await qr_cancel()
     try:

@@ -933,6 +933,24 @@ class TelegramNotifier:
             return
         await self._send(text, ids)
 
+    async def send_document(self, data: bytes, filename: str,
+                            caption: str = "") -> int:
+        """v83: faylni admin(lar)ga yuboradi (zaxira nusxa). Nechta chatga ketdi."""
+        ids = self._settings.admin_id_list
+        if not ids or self.bot is None or not data:
+            return 0
+        sent = 0
+        for cid in ids:
+            try:
+                await self.bot.send_document(
+                    cid, BufferedInputFile(data, filename=filename),
+                    caption=(caption or None), parse_mode=ParseMode.HTML,
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[NOTIFY] fayl yuborilmadi %s: %s", cid, exc)
+        return sent
+
     async def send_error(self, component: str, message: str) -> None:
         # Tizim xatolari faqat adminga
         text = (
