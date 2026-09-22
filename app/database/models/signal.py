@@ -69,6 +69,17 @@ class Signal(Base):
     explanation: Mapped[str] = mapped_column(Text, default="")
     checks_json: Mapped[str] = mapped_column(Text, default="[]")
 
+    # v81: MANBA — qaysi kanal, qaysi post, qachon tashlangan, asl matn va rasm matni.
+    # (Baza eski bo'lsa ustunlar avtomatik qo'shiladi — _ensure_schema.)
+    source_channel: Mapped[str] = mapped_column(String(160), default="")
+    source_username: Mapped[str] = mapped_column(String(64), default="")
+    source_msg_id: Mapped[int] = mapped_column(Integer, default=0)
+    source_posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    source_ocr: Mapped[str] = mapped_column(Text, default="")
+
     # Natija
     result: Mapped[str | None] = mapped_column(String(16), nullable=True)
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)

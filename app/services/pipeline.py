@@ -58,6 +58,13 @@ class AnalysisPipeline:
             live_state.note_check(symbol, timeframe)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[PIPELINE] live_state: %s", exc)
+        try:
+            from app.services import watchdog
+            watchdog.note_candle(symbol, timeframe,
+                                 open_time=df.iloc[-1].get("open_time"),
+                                 price=float(df.iloc[-1].get("close") or 0) or None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[PIPELINE] watchdog: %s", exc)
         await self._track_open_signals(symbol, timeframe, df)
 
     async def _track_open_signals(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:

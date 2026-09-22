@@ -15,7 +15,7 @@ Asosiy API:
 """
 from __future__ import annotations
 
-__version__ = "SINO-LAI-78"
+__version__ = "SINO-LAI-81"
 
 import difflib
 import re
@@ -712,6 +712,31 @@ _PAST_CLAIM = re.compile(r"(berdim|aytdim|aytgan\s*edim|bergan\s*edim|yozdim|ded
 _LOSS_REPORT = re.compile(r"(?<![\w])(?:-\s*\d{1,4}\s*(?:pip|pips|punkt|point))(?![\w])", re.I)
 
 
+# --- v81: o'tgan signallar haqida MAQTOV / NATIJA / HISOBOT postlari ---
+_BRAG81 = re.compile(
+    r"(bizning\s+signal|signallarimiz|signallar\s+ishladi|yana\s+ishladi|"
+    r"oldingi\s+signal|o[`']?tgan\s+signal|kechagi\s+signal|"
+    r"natijalar(imiz)?|bugungi\s+natija|kunlik\s+natija|haftalik\s+natija|"
+    r"oylik\s+natija|hisobot|statistika|"
+    r"tabrik|tabriklaymiz|qutlaymiz|maqtov|minnatdor|"
+    r"rahmat\s+.{0,14}(signal|kanal|do[`']?st)|"
+    r"kim\s+oldi|necha\s+pips|nechta\s+pips|"
+    r"signal\s+berdim|aytgan\s+edim|aytdim\s+ku|aytganimdek|"
+    r"ishonch\s+bilan\s+aytaman|"
+    r"tarixda\s+qoldi|rekord\s+natija|"
+    r"\d+\s*/\s*\d+\s*(?:tp|signal|natija|foyda)|"
+    r"tp\s*\d\s*(?:✅|☑|✔)|(?:✅|☑|✔)\s*tp\s*\d)", re.I)
+
+_TP_HIT81 = re.compile(
+    r"tp\s*([1-5])?\s*[:=\-]?\s*[^\w]{0,4}\s*(?:✅|☑|✔|hit|bajarildi|done|oldik|oldi)",
+    re.I)
+
+
+def _tp_hits81(t: str) -> int:
+    """«TP1 ✅ TP2 ✅ …» — nechta TP «urildi» deb yozilgan."""
+    return len(_TP_HIT81.findall(t or ""))
+
+
 def _struck_share(t: str) -> float:
     """Matnning qancha qismi ~~chizilgan~~ — bekor qilingan xabar belgisi."""
     t = t or ""
@@ -742,6 +767,11 @@ def _result_veto(text: str, has_plan: bool) -> str:
         return "obunachi izohi/otziv"
     if _PAST_CLAIM.search(s) and not has_plan and not price_like:
         return "eski signalga ishora (yangi signal emas)"
+    # v81: o'tgan signallar haqida maqtov / natija / hisobot postlari
+    if _BRAG81.search(s) and not has_plan:
+        return "o'tgan signal haqidagi post (maqtov/natija)"
+    if _tp_hits81(s) >= 2 and not has_plan:
+        return "o'tgan signallar natijasi (TP belgilari)"
     return ""
 
 

@@ -43,6 +43,15 @@ def build_text(cmds: list[str] | None = None) -> str:
         "(\u21A9\uFE0F Qaytarish bor).",
         "\u2022 Faqat SIGNALLAR o'qiladi: grafik/terminal skrinshotlari signal emas "
         "\u2014 matnda to'liq reja (yo'nalish + SL/TP) bo'lishi kerak.",
+        "\u2022 Har signalda MANBASI ko'rinadi: qaysi kanal, qaysi post, qachon "
+        "tashlangan, xabar matni va rasmda yozilgani.",
+        "\u2022 O'tgan signallar haqidagi maqtov/natija postlari SIGNAL EMAS.",
+        "\u2022 Bozor kuzatuvi aniq: sham yetib kelmasa yoki narx to'xtasa \u2014 "
+        "darhol ogohlantirish keladi.",
+        "\u2022 <b>Lot 2</b>: +4R da qulf \u2014 momentum kuchli bo'lsa +5R, "
+        "so'nsa +4R da yopiladi (foyda 4R dan past bo'lmaydi).",
+        "\u2022 Zarar ham, FOYDA ham aniq ko'rsatiladi (dollar hisobida) "
+        "(har lot: risk + maqsadga yetsa qancha).",
         "\u2022 Bir xil xabar takror ishlanmaydi (xabar xotirasi).",
     ]
     if cmds:

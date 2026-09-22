@@ -11,7 +11,8 @@ from aiogram.types import Message
 
 from app.core.symbols import full_label
 from app.database.session import async_session_factory
-from app.notifications.telegram import fmt_price, lot_money_text, lot_reason_text
+from app.notifications.telegram import (fmt_price, lot_money_text,
+                                        lot_profit_text, lot_reason_text)
 from app.paper_trading.engine import PaperEngine
 
 router = Router(name="paper")
@@ -139,12 +140,26 @@ def _open_block(group: list) -> list[str]:
         f"🟢 <b>{full_label(head.symbol)}</b> {head.direction} · "
         f"{str(head.timeframe or '').upper()} · {len(group)} lot ochiq"
     ]
+    goal = 0.0
     for p in group:
         _money = lot_money_text(p)
+        _prof = lot_profit_text(p)          # v79: maqsad narxi + foyda ($)
+        try:
+            from app.engine.risk import money_for_move
+            _t = float(getattr(p, "tp3", 0) or getattr(p, "tp2", 0) or 0)
+            _rq = float(getattr(p, "qty_remaining", 0) or 0)
+            if _t > 0 and _rq > 0:
+                goal += money_for_move(str(getattr(p, "direction", "BUY")),
+                                       float(getattr(p, "entry", 0) or 0), _t, _rq)
+        except Exception:  # noqa: BLE001
+            pass
         out.append(
             f"   📦 {_lot_name(p)}: <b>{_money}</b> · "
-            f"kirish {fmt_price(p.entry)} | stop {fmt_price(p.sl)} | maqsad {fmt_price(p.tp3)}"
+            f"kirish {fmt_price(p.entry)} | stop {fmt_price(p.sl)}"
+            + (f" | {_prof}" if _prof else f" | maqsad {fmt_price(p.tp3)}")
         )
+    if goal:
+        out.append(f"   🎯 Maqsadga yetsa: <b>+{goal:,.2f}$</b> (ikkala lot)")
     return out
 
 

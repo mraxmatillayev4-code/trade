@@ -186,19 +186,37 @@ class Application:
 
     # ---------- Narx (muddat yopilishi uchun) ----------
     async def price_for(self, symbol: str) -> float | None:
-        """Oxirgi narx: avval 1m shamdan, bo'lmasa birjadan."""
+        """Oxirgi narx: 1m shamdan (eskirmagan bo'lsa), aks holda birjadan.
+
+        v81: eskirgan (kutubxonadagi) narx qaytarilmaydi — aks holda SL/TP
+        noto'g'ri hisoblanardi.
+        """
+        from app.services import watchdog as _wd
         try:
             df = self.candles.get_df(symbol, "1m", include_open=True)
             if df is not None and len(df):
                 px = float(df.iloc[-1]["close"])
-                if px > 0:
+                fresh = True
+                try:
+                    ot = df.iloc[-1].get("open_time")
+                    if ot is not None:
+                        age = (datetime.now(timezone.utc) - ot.to_pydatetime()).total_seconds()
+                        fresh = age < 180
+                except Exception:  # noqa: BLE001
+                    fresh = True
+                if px > 0 and fresh:
+                    _wd.note_price(symbol, px, "1m sham")
                     return px
         except Exception:  # noqa: BLE001
             pass
         try:
             if needs_mexc(symbol):
-                return await self.gold.get_last_price(symbol)
-            return await self.rest.get_last_price(symbol)
+                px2 = await self.gold.get_last_price(symbol)
+                _wd.note_price(symbol, px2, "MEXC")
+                return px2
+            px2 = await self.rest.get_last_price(symbol)
+            _wd.note_price(symbol, px2, "birja")
+            return px2
         except Exception as exc:  # noqa: BLE001
             logger.warning("[PX] %s narx olinmadi: %s", symbol, exc)
             return None
@@ -262,6 +280,50 @@ class Application:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[CH-WATCH] start: %s", exc)
 
+        async def watch_guard() -> None:
+            """v81: JONLI KUZATUV + oqim nazorati.
+
+            1) Ochiq signallar uchun narx har ~20 sekundda tekshiriladi —
+               sham yopilishini kutmasdan SL/TP urilishi aniqlanadi.
+            2) Narx oqimi (WS/REST) uzilsa yoki sham kechiksa — ogohlantirish.
+            """
+            from app.services import watchdog
+            await asyncio.sleep(20)
+            while True:
+                try:
+                    open_syms: set[str] = set()
+                    from sqlalchemy import select as _select
+                    from app.database.models.signal import Signal as _Signal
+                    async with async_session_factory() as session:
+                        rows = list((await session.execute(
+                            _select(_Signal).where(_Signal.is_active.is_(True))
+                        )).scalars().all())
+                        sigs = [s for s in rows if (s.quality_mode or "").upper() == "CHANNEL"]
+                        for sig in sigs:
+                            open_syms.add(str(sig.symbol or "").upper())
+                        for sig in sigs:
+                            sym = str(sig.symbol or "").upper()
+                            px = await self.price_for(sym)
+                            if not px:
+                                continue
+                            df = None
+                            try:
+                                df = self.candles.get_df(sym, "1m", include_open=True)
+                            except Exception:  # noqa: BLE001
+                                df = None
+                            await self.tracker.live_tick(
+                                session, sig, float(px), df=df, notifier=self.notifier,
+                            )
+                    await watchdog.check(
+                        notifier=self.notifier,
+                        symbols=self.settings.symbol_list,
+                        timeframes=["1m"],
+                        open_symbols=open_syms,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[WATCHDOG] sikl: %s", exc)
+                await asyncio.sleep(20)
+
         async def expiry_loop() -> None:
             """v50: muddati tugagan signallarni yopish (M1 — 4 soat).
 
@@ -297,6 +359,7 @@ class Application:
                 logger.warning("[DB-BACKUP] start: %s", exc)
 
         self._scheduler_tasks.append(asyncio.create_task(db_backup_loop(), name="db-backup"))
+        self._scheduler_tasks.append(asyncio.create_task(watch_guard(), name="watch-guard"))
         logger.info(
             "Scheduler ishga tushdi: poller har %ss, hisobot %02d:00 UTC "
             "(%02d:00 Toshkent), muddat tekshiruvi har %ss (kanal M1 muddati: %s daqiqa)",

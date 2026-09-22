@@ -7,6 +7,7 @@ EMAS chatga yuborilmaydi.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -468,18 +469,39 @@ async def _notify(signal) -> None:
             pass
 
 
+_OCR_CACHE: dict = {}
+
+
+def _ocr_cached(image_bytes: bytes | None) -> str:
+    """v81: rasm matni BIR MARTA o'qiladi va signalda alohida saqlanadi."""
+    if not image_bytes:
+        return ""
+    try:
+        key = (len(image_bytes), hash(image_bytes[:256]))
+    except Exception:  # noqa: BLE001
+        key = (len(image_bytes), 0)
+    if key in _OCR_CACHE:
+        return _OCR_CACHE[key]
+    txt = ""
+    try:
+        from app.services.channel_ocr import ocr_image
+        txt = (ocr_image(image_bytes) or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[CH] OCR o'qilmadi: %s", exc)
+        txt = ""
+    if len(_OCR_CACHE) > 60:
+        _OCR_CACHE.clear()
+    _OCR_CACHE[key] = txt
+    return txt
+
+
 def _read_text(text: str, image_bytes: bytes | None) -> str:
-    from app.services.channel_ocr import ocr_image
     parts = []
     if (text or "").strip():
         parts.append(text.strip())
-    if image_bytes:
-        try:
-            o = (ocr_image(image_bytes) or "").strip()
-            if o:
-                parts.append(o)
-        except Exception:  # noqa: BLE001
-            pass
+    o = _ocr_cached(image_bytes)
+    if o:
+        parts.append(o)
     return "\n".join(parts)
 
 
@@ -514,19 +536,35 @@ async def ingest_raw(*, ch: dict, text: str, image_bytes: bytes | None = None,
                      title: str = "", username: str | None = None,
                      notify_verdict: bool = False,
                      grouped_id=None, reply_to: int | None = None,
-                     require_listed: bool = True) -> str:
+                     require_listed: bool = True,
+                     posted_at=None) -> str:
     async with _lock:
         return await _run(
             ch=ch or {}, text=text or "", image_bytes=image_bytes,
             msg_id=int(msg_id or 0), chat_id=chat_id, title=title or "",
             username=username, grouped_id=grouped_id, reply_to=reply_to,
-            require_listed=require_listed,
+            require_listed=require_listed, posted_at=posted_at,
         )
+
+
+def _aware_utc(v):
+    """Telethon/Telegram vaqti → vaqt mintaqali UTC datetime (v81)."""
+    if v is None:
+        return None
+    try:
+        from datetime import timezone as _tz
+        if isinstance(v, (int, float)):
+            return datetime.fromtimestamp(float(v), tz=_tz.utc)
+        if getattr(v, "tzinfo", None) is None:
+            return v.replace(tzinfo=_tz.utc)
+        return v
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                chat_id, title: str, username, grouped_id, reply_to,
-               require_listed: bool) -> str:
+               require_listed: bool, posted_at=None) -> str:
     uname = (username or ch.get("username") or "").lstrip("@").lower()
     bare = int(peer_bare(chat_id) or chat_id or 0)
     key = (bare, msg_id, uname)
@@ -547,6 +585,8 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
         logger.warning("[CH] xabar xotirasi tekshiruvi: %s", exc)
 
     raw = _read_text(text, image_bytes)
+    ocr_txt = _ocr_cached(image_bytes) if image_bytes else ""
+    posted_dt = _aware_utc(posted_at)
     closing = is_close_message(text) or is_close_message(raw)
     cur = _parse_now(text) or _parse_now(raw)
     cur_new = bool(
@@ -679,8 +719,34 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                 pass
 
         settings = _settings or get_settings()
+
+        # v81: o'tgan signal haqidagi natija/maqtov posti YANGI signal emas
         try:
-            verdict = await _save(session, rec, parsed, settings, src)
+            _rep = await _repeat_result(session, text=text, raw=raw, parsed=parsed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CH] takroriy natija tekshiruvi: %s", exc)
+            _rep = ""
+        if _rep:
+            logger.warning("[CH-EMAS] %s | sabab=%s | matn=%s", src, _rep,
+                           (text or raw or "")[:120])
+            await _diag(skey, src, "emas", _rep, text or raw or "")
+            try:
+                await record_read(session, rec, False)
+            except Exception:  # noqa: BLE001
+                pass
+            return "not_signal"
+
+        _meta = {
+            "channel": src,
+            "username": (rec.get("username") or uname or ""),
+            "chat_id": int(chat_id) if chat_id else 0,
+            "msg_id": int(msg_id or 0),
+            "posted_at": posted_dt,
+            "text": (text or "").strip(),
+            "ocr": ocr_txt or "",
+        }
+        try:
+            verdict = await _save(session, rec, parsed, settings, src, meta=_meta)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CH-SAVE-ERR] %s: %s", type(exc).__name__, exc)
             try:
@@ -694,7 +760,8 @@ async def _run(*, ch: dict, text: str, image_bytes, msg_id: int,
                 fixed = ""
             if fixed:
                 try:
-                    verdict = await _save(session, rec, parsed, settings, src)
+                    verdict = await _save(session, rec, parsed, settings, src,
+                                          meta=_meta)
                     logger.warning("[CH-SAVE-RETRY] sxema tuzatildi (%s) → %s",
                                    fixed, verdict)
                     if verdict == "ok":
@@ -886,7 +953,97 @@ async def _limit_blocked(session, settings,
     return (n_act >= limit_act), n_act, limit_act
 
 
-async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
+# ================= v81: o'tgan signal haqidagi postlar (maqtov/natija) =================
+_RESULT_MARK = re.compile(
+    r"(pips?|punkt|point|profit|foyda|zarar|natija|result|recap|oldik|oldi\b|"
+    r"yopildi|hit\b|tp\s*\d?\s*(bajarildi|done|ok)|maqtov|rahmat|tabrik|"
+    r"\+\s*\d{2,4}\s*%|\u2705|\u2705|\U0001F680|\U0001F525)", re.I)
+_RESULT_HARD = re.compile(
+    r"(natija|result|recap|pips?\s*\+?|\+\s*\d+\s*(pip|punkt|%|usd|\$)|"
+    r"oldik|foyda|profit|tabrik|maqtov|rahmat|yopildi|hit)", re.I)
+_NUM81 = re.compile(r"\b\d{3,5}(?:[.,]\d{1,3})?\b")
+
+
+async def _tracked_levels(session, days: int = 7, limit: int = 60) -> list[float]:
+    """Oxirgi kunlardagi signallarning narx darajalari (entry/sl/tp)."""
+    from datetime import timedelta
+    from sqlalchemy import select as _sel
+    from app.database.models.signal import Signal as _S
+    out: list[float] = []
+    try:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = list((await session.execute(
+            _sel(_S).where(_S.created_at >= since).order_by(_S.id.desc()).limit(limit)
+        )).scalars().all())
+    except Exception:  # noqa: BLE001
+        return out
+    for r in rows:
+        if getattr(r, "quality_mode", "") != "CHANNEL":
+            continue
+        for attr in ("entry", "sl", "tp1", "tp2", "tp3"):
+            try:
+                v = float(getattr(r, attr, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                out.append(v)
+    return out
+
+
+async def _repeat_result(session, *, text: str, raw: str, parsed) -> str:
+    """v81: «TP1 ✅ TP2 ✅ +250$ oldik», «signallarimiz yana ishladi» kabi post —
+    yangi signal EMAS, o'tgan signalning natijasi (yolg'on signal manbai)."""
+    blob = " ".join(x for x in ((text or ""), (raw or "")) if x)
+    if not blob.strip():
+        return ""
+    # O'Z rejasi (SL yoki entry+TP) bo'lsa — yangi signal bo'lishi mumkin
+    own = False
+    try:
+        from app.services.local_ai import _full_plan, analyze_ex
+        own = bool(_full_plan((text or "").strip()))
+        if not own:
+            _s2, _w2, _v2 = analyze_ex(text or raw, ocr="", has_image=False)
+            own = _s2 is not None and not _v2
+    except Exception:  # noqa: BLE001
+        own = False
+    # Matnning o'zi «natija/maqtov» bo'lsa — shu yerda ham veto (ikkinchi qavat)
+    try:
+        from app.services.local_ai import _result_veto
+        _rv = _result_veto(blob, own)
+        if _rv:
+            return _rv
+    except Exception:  # noqa: BLE001
+        pass
+    if not _RESULT_MARK.search(blob):
+        return ""
+    levels = await _tracked_levels(session)
+    if not levels:
+        return ""
+    hits = 0
+    seen: set[int] = set()
+    for m in _NUM81.finditer(blob):
+        try:
+            v = float(m.group(0).replace(",", "."))
+        except ValueError:
+            continue
+        if v < 100 or v in seen:
+            continue
+        seen.add(v)
+        for lv in levels:
+            if lv and abs(v - lv) / lv <= 0.0025:
+                hits += 1
+                break
+    if hits <= 0:
+        return ""
+    if own:
+        if hits >= 2 and _RESULT_HARD.search(blob):
+            return f"oldingi signal natijasi (narxlar mos: {hits} daraja)"
+        return ""
+    return f"oldingi signal haqidagi post (narxlar mos: {hits} daraja)"
+
+
+async def _save(session, ch: dict, parsed, settings: Settings, src: str,
+                meta: dict | None = None) -> str:
     # v46: jadval ustunlari joyidami — yo'q bo'lsa qo'shamiz
     try:
         await _ensure_schema(session)
@@ -1080,8 +1237,16 @@ async def _save(session, ch: dict, parsed, settings: Settings, src: str) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CH] count_signals: %s", exc)
 
+    _meta = dict(meta or {})
+
     def _mk() -> Signal:
         return Signal(
+            source_channel=str(_meta.get("channel") or src or "")[:160],
+            source_username=str(_meta.get("username") or "")[:64],
+            source_msg_id=int(_meta.get("msg_id") or 0),
+            source_posted_at=_meta.get("posted_at"),
+            source_text=str(_meta.get("text") or "")[:1500],
+            source_ocr=str(_meta.get("ocr") or "")[:900],
             symbol=symbol, timeframe=timeframe, direction=direction.value,
             status=SignalStatus.ACTIVE.value, is_active=True,
             score=6.5, confidence=60.0, win_probability=55.0,
@@ -1185,6 +1350,7 @@ async def ingest_channel_post(message) -> None:
         grouped_id=getattr(message, "media_group_id", None),
         reply_to=getattr(getattr(message, "reply_to_message", None), "message_id", None),
         require_listed=True,
+        posted_at=getattr(message, "date", None),   # v81
     )
 
 
@@ -1233,8 +1399,14 @@ async def ingest_from_bot_message(message) -> str:
                 "title": title or "Botga yuborilgan",
                 "kind": "manual",
             }
+    _origin_date = None
+    try:
+        _origin_date = getattr(orig, "date", None) if orig is not None else None
+    except Exception:  # noqa: BLE001
+        _origin_date = None
     return await ingest_raw(
         ch=ch, text=text, image_bytes=img,
         msg_id=mid, chat_id=chat_id, title=title, username=username,
         require_listed=False,
+        posted_at=_origin_date or getattr(message, "date", None),   # v81
     )

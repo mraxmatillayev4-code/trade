@@ -41,16 +41,21 @@ def classify_result(r: float) -> str:
 
 
 def _momentum_ok(df: pd.DataFrame, buy: bool) -> bool:
+    """v80: kuchli momentum bormi (app.engine.momentum bahosi)."""
     try:
-        if df is None or len(df) < 4:
-            return False
-        c = df["close"].astype(float)
-        last, prev, older = float(c.iloc[-1]), float(c.iloc[-2]), float(c.iloc[-3])
-        if buy:
-            return last >= prev and last > older
-        return last <= prev and last < older
+        from app.engine import momentum
+        return momentum.is_strong(df, buy)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _sl_reason(p) -> str:
+    """v80: lot qanday yopilgani — +4R qulf bo'lsa «TP4»."""
+    if int(getattr(p, "stage", 0) or 0) == 13:
+        return "TP4"
+    if getattr(p, "sl_moved_to_be", False):
+        return "BE"
+    return "SL"
 
 
 def _is_runner(p) -> bool:
@@ -61,13 +66,104 @@ class SignalTracker:
     def __init__(self, paper_engine: PaperEngine, settings: Settings) -> None:
         self._paper = paper_engine
         self._settings = settings
+        # v81: signal bo'yicha oxirgi tekshirilgan sham vaqti — o'tkazib
+        # yuborilgan shamlarni ham hisobga olish uchun (xatolik manbai edi).
+        self._last_bar: dict[int, object] = {}
+        # v81: jonli (tick) tekshiruvlar soni — diagnostika uchun
+        self.live_checks = 0
+
+    def _bars_to_check(self, signal, df: pd.DataFrame) -> list[int]:
+        """Oxirgi tekshiruvdan keyingi yopiq shamlarning POZITSIYALARI.
+
+        v81: bot qayta ishga tushsa yoki sham oqimi uzilsa, o'tkazib
+        yuborilgan shamlardagi SL/TP ham hisobga olinadi (ilgari yo'qolardi).
+        """
+        try:
+            n = len(df)
+            if n == 0:
+                return []
+            if "open_time" not in df.columns:
+                return [n - 1]
+            last_seen = self._last_bar.get(int(signal.id))
+            if last_seen is None:
+                return [n - 1]
+            pos = []
+            for i in range(n):
+                try:
+                    if df.iloc[i]["open_time"] > last_seen:
+                        pos.append(i)
+                except Exception:  # noqa: BLE001
+                    continue
+            if not pos:
+                return []
+            return pos[-240:]     # cheksiz catch-up bo'lmasin
+        except Exception:  # noqa: BLE001
+            return [len(df) - 1]
+
+    def _mark_bar(self, signal, df: pd.DataFrame) -> None:
+        try:
+            if "open_time" in df.columns and len(df):
+                self._last_bar[int(signal.id)] = df.iloc[-1]["open_time"]
+                if len(self._last_bar) > 800:
+                    self._last_bar.clear()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def update_for_candle(self, session: AsyncSession, signal: Signal,
                                 df: pd.DataFrame, notifier=None) -> None:
+        """Yopiq sham(lar) bo'yicha kuzatish — v81: o'tkazib yuborilgan
+        shamlarni ham tartib bilan tekshiradi (SL/TP o'tib ketmaydi)."""
         try:
-            await self._process(session, signal, df, notifier)
+            pos = self._bars_to_check(signal, df)
+            if not pos:
+                return
+            for i in pos:
+                # momentum uchun oldingi shamlar ham beriladi (v80 qoidasi),
+                # SL/TP tekshiruvi esa AYNAN shu shamning high/low bo'yicha.
+                win = df.iloc[max(0, i - 40): i + 1]
+                await self._process(session, signal, win, notifier)
+                try:
+                    await session.refresh(signal)
+                except Exception:  # noqa: BLE001
+                    pass
+                if not bool(getattr(signal, "is_active", True)):
+                    break
+            self._mark_bar(signal, df)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Tracker xatosi signal #%s: %s", signal.id, exc)
+
+    async def live_tick(self, session: AsyncSession, signal: Signal, price: float,
+                        df: pd.DataFrame | None = None, notifier=None) -> bool:
+        """v81: JONLI narx bo'yicha tekshiruv (sham yopilishini kutmaysiz).
+
+        Narx SL yoki TP darajasidan o'tsa — shu yerda yopiladi (broker kabi).
+        Momentum qarori uchun yaqin shamlardan foydalanadi.
+        """
+        try:
+            px = float(price or 0)
+            if px <= 0:
+                return False
+            base = None
+            if df is not None and len(df):
+                base = df.tail(30).copy()
+            if base is None or len(base) == 0:
+                import pandas as _pd
+                base = _pd.DataFrame(
+                    [{"open": px, "high": px, "low": px, "close": px, "volume": 0.0}]
+                )
+            else:
+                r = base.iloc[-1].to_dict()
+                r["high"] = max(float(r.get("high", px)), px)
+                r["low"] = min(float(r.get("low", px)), px)
+                r["close"] = px
+                base.iloc[-1] = r
+            self.live_checks += 1
+            await self._process(session, signal, base, notifier)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TRACKER] jonli tekshiruv #%s: %s",
+                           getattr(signal, "id", "?"), exc)
+            return False
 
     async def _fill(self, session, pos, price: float, *,
                     count_trade: bool = True, reason: str = "") -> None:
@@ -75,6 +171,30 @@ class SignalTracker:
             session, pos, price, portion=0.0, is_final=True,
             exit_price_for_remaining=price, count_trade=count_trade, reason=reason,
         )
+
+    @staticmethod
+    def _px(bar, level: float, buy: bool, kind: str) -> float:
+        """v81: GAP himoyasi.
+
+        Sham darajadan nariga ochilib ketgan bo'lsa, buyurtma darajada emas,
+        shamning OCHILISH narxida bajariladi (real brokerdagidek).
+        """
+        try:
+            op = float(bar["open"])
+        except Exception:  # noqa: BLE001
+            return float(level)
+        lv = float(level)
+        if kind == "sl":
+            if buy and op < lv:
+                return op
+            if (not buy) and op > lv:
+                return op
+        else:  # tp
+            if buy and op > lv:
+                return op
+            if (not buy) and op < lv:
+                return op
+        return lv
 
     # ---------- Muddat (M1 signallar abadiy ochiq qolmasin) ----------
     def expiry_minutes(self, signal) -> int:
@@ -220,8 +340,9 @@ class SignalTracker:
             sl = float(p.sl or signal.sl)
             if hit_below(sl):
                 try:
-                    await self._fill(session, p, sl, count_trade=not counted,
-                                     reason=("BE" if getattr(p, "sl_moved_to_be", False) else "SL"))
+                    await self._fill(session, p, self._px(last, sl, buy, "sl"),
+                                     count_trade=not counted,
+                                     reason=_sl_reason(p))
                     counted = True
                     sl_closed.append(p)
                 except Exception as exc:  # noqa: BLE001
@@ -230,22 +351,29 @@ class SignalTracker:
                 still.append(p)
 
         if sl_closed and notifier:
-            r_sl = -1.0 if not any(getattr(p, "sl_moved_to_be", False) for p in sl_closed) else 0.0
-            word = "−1R STOP" if r_sl < 0 else "breakeven"
+            locked = [p for p in sl_closed if int(getattr(p, "stage", 0) or 0) == 13]
+            be_only = all(getattr(p, "sl_moved_to_be", False) for p in sl_closed) and not locked
+            word = ("−1R STOP" if not be_only and not locked
+                    else ("🔒 +4R qulfda yopildi (momentum so'ndi)" if locked else "breakeven"))
             no = f"№{signal.signal_no} " if getattr(signal, "signal_no", None) else ""
             await notifier.send_event(
-                f"🛑 <b>{no}{signal.symbol}</b> — {word} ({len(sl_closed)} lot) @ {format_price(sl_closed[0].sl)}"
+                f"🛑 <b>{no}{signal.symbol}</b> — {word} ({len(sl_closed)} lot) "
+                f"@ {format_price(sl_closed[0].sl)}"
+                + ("  · Lot 2 shartiga muvofiq: 4R dan past bo'lmadi." if locked else "")
             )
 
         positions = still
         if not positions:
+            locked = [p for p in sl_closed if int(getattr(p, "stage", 0) or 0) == 13]
             be = any(getattr(p, "sl_moved_to_be", False) for p in sl_closed)
             if not be:
                 signal.status = SignalStatus.SL_HIT.value
+            elif locked:
+                signal.status = SignalStatus.TP4_HIT.value       # v80: 4R qulf
             await self._finish_signal(
                 session, signal, notifier,
                 exit_price=float(signal.sl),
-                r_hint=(0.0 if be else -1.0),
+                r_hint=None if locked else (0.0 if be else -1.0),
             )
             return
 
@@ -273,9 +401,10 @@ class SignalTracker:
         lot1 = [p for p in positions if not _is_runner(p)]
         lot2 = [p for p in positions if _is_runner(p)]
         if lot1 and hit_above(float(signal.tp3)):
+            _tp3_px = self._px(last, float(signal.tp3), buy, "tp")
             for i, p in enumerate(lot1):
                 try:
-                    await self._fill(session, p, float(signal.tp3), count_trade=(i == 0),
+                    await self._fill(session, p, _tp3_px, count_trade=(i == 0),
                                      reason="TP3")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot1 3R: %s", exc)
@@ -305,15 +434,47 @@ class SignalTracker:
                 await self._finish_signal(session, signal, notifier, exit_price=float(signal.tp3))
             return
 
-        mom = _momentum_ok(df, buy)
+        # v80: momentum bahosi (0..1) — Lot 2 qarori shunga bog'liq
+        try:
+            from app.engine import momentum as _mom_mod
+            _mom_score = _mom_mod.score(df, buy)
+            mom_label = _mom_mod.label(_mom_score)
+            mom = _mom_score >= _mom_mod.STRONG
+        except Exception:  # noqa: BLE001
+            _mom_score, mom_label, mom = 0.0, "o'rtacha", _momentum_ok(df, buy)
         hit4 = hit_above(tp4)
         hit5 = hit_above(tp5)
 
+        # v80: +4R qulfda kutilyapti (stage 13) — momentum so'nsa +4R da yopamiz
+        locked = [p for p in lot2 if int(getattr(p, "stage", 0) or 0) == 13]
+        if locked and not hit5:
+            close_now = float(last["close"])
+            if not mom and (close_now >= tp4 if buy else close_now <= tp4):
+                for i, p in enumerate(locked):
+                    try:
+                        await self._fill(session, p, close_now, count_trade=False,
+                                         reason="TP4")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[TRACKER] lot2 qulf 4R: %s", exc)
+                signal.status = SignalStatus.TP4_HIT.value
+                await session.commit()
+                if notifier:
+                    no = f"№{signal.signal_no} " if getattr(signal, "signal_no", None) else ""
+                    await notifier.send_event(
+                        f"🔒 <b>{no}{signal.symbol}</b> — Lot2 +4R da yopildi "
+                        f"({mom_label}, momentum {_mom_score:.2f} — so'ndi) @ "
+                        f"{format_price(close_now)}."
+                    )
+                await self._finish_signal(session, signal, notifier, exit_price=close_now,
+                                          r_hint=3.5)
+                return
+
         if hit5:
+            _tp5_px = self._px(last, tp5, buy, "tp")
             for i, p in enumerate(lot2):
                 # Lot2 uchun bitim QAYTA sanalmaydi — Lot1 yopilganda sanalgan
                 try:
-                    await self._fill(session, p, tp5, count_trade=False, reason="TP5")
+                    await self._fill(session, p, _tp5_px, count_trade=False, reason="TP5")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot2 5R: %s", exc)
             signal.status = SignalStatus.TP5_HIT.value
@@ -328,29 +489,40 @@ class SignalTracker:
 
         if hit4:
             if mom:
+                # v80: foyda 4R QULFLANADI (stop +4R ga suriladi) — Lot 2 hech qachon
+                # 4R dan past yopilmaydi; momentum kuchli bo'lsa +5R kutiladi.
                 for p in lot2:
-                    p.sl = float(signal.tp3)
+                    p.sl = float(tp4)
                     p.sl_moved_to_be = True
                     p.stage = 13
                 signal.status = SignalStatus.TP4_HIT.value
                 await session.commit()
                 if notifier:
                     no = f"№{signal.signal_no} " if getattr(signal, "signal_no", None) else ""
+                    sc_txt = f"{_mom_score:.2f}" if isinstance(_mom_score, float) else "—"
                     await notifier.send_event(
-                        f"🚀 <b>{no}{signal.symbol}</b> — Lot2 +4R. Momentum bor — +5R kutiladi. Stop +3R."
+                        f"🚀 <b>{no}{signal.symbol}</b> — <b>Lot2 +4R</b> ({mom_label}, "
+                        f"momentum {sc_txt}) · <b>+5R kutiladi</b> · stop +4R ga qulflandi "
+                        f"({format_price(tp4)}) — foyda 4R dan past bo'lmaydi."
                     )
-                logger.info("[TRACKER] #%s lot2 +4R → 5R", signal.id)
+                logger.info("[TRACKER] #%s lot2 +4R qulf → 5R", signal.id)
                 return
+
+            # momentum so'ngan — +4R da yopiladi (qoida: Lot 2 = +4R yoki +5R)
+            _tp4_px = self._px(last, tp4, buy, "tp")
             for i, p in enumerate(lot2):
                 try:
-                    await self._fill(session, p, tp4, count_trade=False, reason="TP4")
+                    await self._fill(session, p, _tp4_px, count_trade=False, reason="TP4")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[TRACKER] lot2 4R: %s", exc)
             signal.status = SignalStatus.TP4_HIT.value
             await session.commit()
             if notifier:
+                no = f"№{signal.signal_no} " if getattr(signal, "signal_no", None) else ""
+                sc_txt = f"{_mom_score:.2f}" if isinstance(_mom_score, float) else "—"
                 await notifier.send_event(
-                    f"🚀 <b>{signal.symbol}</b> — <b>Lot2 +4R yopildi</b> @ {format_price(tp4)}."
+                    f"🚀 <b>{no}{signal.symbol}</b> — <b>Lot2 +4R yopildi</b> @ "
+                    f"{format_price(tp4)} ({mom_label}, momentum {sc_txt})."
                 )
             await self._finish_signal(session, signal, notifier, exit_price=tp4, r_hint=3.5)
             return

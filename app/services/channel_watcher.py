@@ -198,6 +198,7 @@ async def _process_msg(msg, ch: dict) -> None:
         msg_id=mid, chat_id=chat_id, title=title, username=username,
         notify_verdict=False, grouped_id=gid, reply_to=reply_to,
         require_listed=True,
+        posted_at=getattr(msg, "date", None),   # v81: post qachon tashlangan
     )
     async with async_session_factory() as session:
         await touch_channel(

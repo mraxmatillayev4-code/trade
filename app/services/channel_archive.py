@@ -112,6 +112,45 @@ async def _insert_rows(session, rows: list[dict]) -> int:
     return n
 
 
+async def fetch_msg(msg_id: int, username: str | None = None) -> dict | None:
+    """v81: arxivdagi postni topib beradi — matn, OCR va tashlangan vaqti.
+
+    Signal kartasi eski bo'lsa (manba saqlanmagan) «Nega bu signal?» shu
+    yerdan asl xabarni ko'rsatadi.
+    """
+    mid = int(msg_id or 0)
+    if mid <= 0:
+        return None
+    try:
+        async with async_session_factory() as session:
+            await ensure_table(session)
+            u = (username or "").lstrip("@").lower()
+            if u:
+                r = await session.execute(text(
+                    f"SELECT username, title, msg_id, msg_date, body, ocr FROM {TABLE} "
+                    f"WHERE msg_id = :m AND LOWER(COALESCE(username,'')) = :u "
+                    f"ORDER BY id DESC LIMIT 1"), {"m": mid, "u": u})
+            else:
+                r = await session.execute(text(
+                    f"SELECT username, title, msg_id, msg_date, body, ocr FROM {TABLE} "
+                    f"WHERE msg_id = :m ORDER BY id DESC LIMIT 1"), {"m": mid})
+            row = r.fetchone()
+            if row is None and u:
+                r = await session.execute(text(
+                    f"SELECT username, title, msg_id, msg_date, body, ocr FROM {TABLE} "
+                    f"WHERE msg_id = :m ORDER BY id DESC LIMIT 1"), {"m": mid})
+                row = r.fetchone()
+            if row is None:
+                return None
+            return {
+                "username": row[0] or "", "title": row[1] or "", "msg_id": int(row[2] or 0),
+                "date": row[3], "body": row[4] or "", "ocr": row[5] or "",
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[CH-ARCH] fetch_msg: %s", exc)
+        return None
+
+
 async def stats() -> dict:
     out: dict = {"total": 0, "channels": []}
     try:

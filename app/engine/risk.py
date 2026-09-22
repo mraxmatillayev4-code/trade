@@ -100,6 +100,30 @@ def money_for_move(direction, entry: float, price: float, qty: float) -> float:
     return (p - e) * q if d == "BUY" else (e - p) * q
 
 
+def money_at_r(risk_distance: float, qty: float, r: float) -> float:
+    """v79: +rR darajaga yetsa olinadigan pul — ZARAR bilan bir xil formulada.
+
+    risk = hajm(oz) x stop masofasi;  foyda(+rR) = risk x r.
+    Masalan 50 oz, stop 2.397$ -> risk 119.85$; +3R da foyda 359.55$.
+    """
+    try:
+        d = abs(float(risk_distance or 0.0))
+        q = float(qty or 0.0)
+        rr = float(r or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return q * d * rr
+
+
+def target_money(direction, entry: float, target: float, qty: float) -> float:
+    """v79: maqsadga yetsa olinadigan pul (narx farqi x hajm) — aniq hisob.
+
+    Xuddi shu `money_for_move` ishlatiladi: SELL 4348.68 -> 4345.00, 50 oz
+    = +184.15$ (soxta raqam emas, terminaldagi formula).
+    """
+    return money_for_move(direction, entry, target, qty)
+
+
 def lot_position_size(risk_distance: float, lot: float = 1.0,
                       contract: float = CONTRACT_OZ) -> tuple[float, float]:
     """v68: hajm bo'yicha pozitsiya — (qty_oz, shu hajmdagi pul riski).

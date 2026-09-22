@@ -84,6 +84,73 @@ def _source_line(signal: Signal) -> str:
     return "📡 <b>Manba:</b> signal kanali"
 
 
+def _esc81(v) -> str:
+    """HTML uchun xavfsiz matn (kanal matni foydalanuvchi tomonidan yozilgan)."""
+    import html as _html
+    return _html.escape(str(v or ""), quote=False)
+
+
+def source_block(signal: Signal, *, full: bool = True, text_limit: int = 700) -> list[str]:
+    """v81: SIGNAL QAYSI KANALNING QAYSI XABARIDAN — post, vaqt, asl matn, rasm matni.
+
+    full=True  -> «Nega bu signal?» uchun to'liq matn
+    full=False -> qisqa karta uchun (matn qisqartiriladi)
+    """
+    ch = str(getattr(signal, "source_channel", "") or "").strip()
+    un = str(getattr(signal, "source_username", "") or "").strip().lstrip("@")
+    mid = int(getattr(signal, "source_msg_id", 0) or 0)
+    posted = getattr(signal, "source_posted_at", None)
+    body = str(getattr(signal, "source_text", "") or "").strip()
+    ocr = str(getattr(signal, "source_ocr", "") or "").strip()
+    if not (ch or un or mid or body or ocr):
+        return []
+    lim = text_limit if full else 240
+    out = ["━━━━━━━━━━━━━━━━", "📡 <b>MANBA — qaysi xabardan olingan</b>"]
+    name = ch or (("@" + un) if un else "noma'lum kanal")
+    if un and un.lower() not in name.lower():
+        name = f"{name} (@{un})"
+    out.append(f"   📣 Kanal: <b>{_esc81(name)}</b>")
+    if mid:
+        link = ""
+        if un:
+            link = f"  ·  t.me/{un}/{mid}"
+        out.append(f"   🆔 Post: <b>#{mid}</b>{_esc81(link)}")
+    if posted is not None:
+        out.append(f"   🕐 Post vaqti: <b>{format_tashkent(posted)}</b>")
+    err = _age_text(getattr(signal, "created_at", None), posted)
+    if err:
+        out.append(f"   ⚡ Bot o'qigan: {format_tashkent(signal.created_at)} ({err} keyin)")
+    if body:
+        cut = "" if len(body) <= lim else " …"
+        out.append("   📝 <b>Kanal xabari (asl holda):</b>")
+        out.append(f"   <blockquote>{_esc81(body[:lim])}{cut}</blockquote>")
+    if ocr:
+        cut = "" if len(ocr) <= lim else " …"
+        out.append("   🖼 <b>Rasmda yozilgan (OCR):</b>")
+        out.append(f"   <blockquote>{_esc81(ocr[:lim])}{cut}</blockquote>")
+    else:
+        out.append("   🖼 Rasm: <i>rasm matni yo'q (yoki rasm yo'q)</i>")
+    return out
+
+
+def _age_text(created, posted) -> str:
+    """Post tashlangandan keyin bot qancha vaqt o'tib o'qigan."""
+    try:
+        from datetime import timezone as _tz
+        if created is None or posted is None:
+            return ""
+        a = created if created.tzinfo else created.replace(tzinfo=_tz.utc)
+        b = posted if posted.tzinfo else posted.replace(tzinfo=_tz.utc)
+        d = abs((a - b).total_seconds())
+        if d < 90:
+            return f"{int(d)} soniya"
+        if d < 5400:
+            return f"{int(d // 60)} daqiqa"
+        return f"{d / 3600:.1f} soat"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _expiry_text(signal: Signal) -> str:
     """'4 soat' / '36 daqiqa' — signal qancha vaqt amal qiladi."""
     try:
@@ -158,11 +225,13 @@ def lot_money_line(balance: float = 0.0, risk_percent: float = 1.0, *,
 
 
 def lots_entry_lines(signal, *, lot: float = 1.0, contract: float = 100.0) -> list[str]:
-    """v77: HAR BIR LOT - qanchadan ochilgani aniq ko'rinadi.
+    """v77/v79: HAR BIR LOT - qanchadan ochilgani va maqsadga yetsa qancha foyda.
 
-    «📥 Lot 1: 0.50 lot · ochilish 4,348.68 · stop 4,351.08 · maqsad 4,345.68 (+3R)»
+    «📥 Lot 1: 0.50 lot · ochilish 4,348.68 · stop 4,351.08 · maqsad 4,345.00 (+3R)
+      · risk 119.85$ · foyda +359.55$»
+    Foyda ham, risk ham bitta formulada: hajm(oz) x narx farqi.
     """
-    from app.engine.risk import lot_position_size, r_price
+    from app.engine.risk import lot_position_size, money_for_move, r_price
     d = str(getattr(signal, "direction", "") or "").upper()
     entry = float(getattr(signal, "entry", 0) or 0)
     sl = float(getattr(signal, "sl", 0) or 0)
@@ -171,20 +240,83 @@ def lots_entry_lines(signal, *, lot: float = 1.0, contract: float = 100.0) -> li
     qty, risk_all = lot_position_size(abs(entry - sl), lot, contract)
     if qty <= 0:
         return []
-    half_lot = qty / 2.0 / (contract or 100.0)
+    half_q = qty / 2.0
+    half_lot = half_q / (contract or 100.0)
     half_risk = risk_all / 2.0
+    risk_dist = abs(entry - sl)
     tp1 = float(getattr(signal, "tp1", 0) or 0)
     tp2 = float(getattr(signal, "tp2", 0) or 0)
     tp3 = float(getattr(signal, "tp3", 0) or 0)
-    return [
+    t1 = tp3 or tp2 or tp1
+    t2 = r_price(d, entry, sl, 4)      # Lot 2 asosiy maqsadi (+4R)
+    t2m = r_price(d, entry, sl, 5)     # Lot 2 momentum maqsadi (+5R)
+    p1 = money_for_move(d, entry, t1, half_q) if t1 > 0 else risk_dist * half_q * 3.0
+    p2 = money_for_move(d, entry, t2, half_q)
+    p2m = money_for_move(d, entry, t2m, half_q)
+    out = [
         f"\U0001F4E5 <b>Lot 1</b>: {half_lot:,.2f} lot \u00B7 ochilish <b>{fmt_price(entry)}</b> "
-        f"\u00B7 stop {fmt_price(sl)} \u00B7 maqsad {fmt_price(tp3 or tp2 or tp1)} (+3R)"
-        f" \u00B7 risk {half_risk:,.2f}$",
+        f"\u00B7 stop {fmt_price(sl)} \u00B7 maqsad {fmt_price(t1)} (+3R)",
+        f"      \u26A0\uFE0F risk {half_risk:,.2f}$ \u00B7 \U0001F7E2 foyda +{p1:,.2f}$ (+3R)",
         f"\U0001F4E5 <b>Lot 2</b>: {half_lot:,.2f} lot \u00B7 ochilish <b>{fmt_price(entry)}</b> "
         f"\u00B7 stop {fmt_price(sl)} (keyin +1R da {fmt_price(entry)}) "
-        f"\u00B7 maqsad {fmt_price(r_price(d, entry, sl, 4))} (+4R)"
-        f" \u00B7 risk {half_risk:,.2f}$",
+        f"\u00B7 maqsad {fmt_price(t2)} (+4R) \u00B7 momentum {fmt_price(t2m)} (+5R)",
+        f"      \u26A0\uFE0F risk {half_risk:,.2f}$ \u00B7 \U0001F7E2 foyda +{p2:,.2f}$ (+4R) "
+        f"\u00B7 momentumda +{p2m:,.2f}$ (+5R)",
     ]
+    out.append(lots_profit_line(signal, lot=lot, contract=contract))
+    out.append(
+        "\U0001F512 <b>Lot 2 qoidasi</b>: +4R da stop +4R ga qulflanadi \u2014 momentum "
+        "kuchli bo'lsa +5R gacha boradi, so'nsa +4R da yopiladi "
+        "(foyda 4R dan pastga tushmaydi)."
+    )
+    return out
+
+
+def lots_profit_line(signal, *, lot: float = 1.0, contract: float = 100.0) -> str:
+    """v79: «🎯 Maqsadga yetsa: +838.95$ (Lot 1 +359.55$ · Lot 2 +479.40$)»."""
+    from app.engine.risk import lot_position_size, money_for_move, r_price
+    d = str(getattr(signal, "direction", "") or "").upper()
+    entry = float(getattr(signal, "entry", 0) or 0)
+    sl = float(getattr(signal, "sl", 0) or 0)
+    if entry <= 0 or sl <= 0 or d not in ("BUY", "SELL"):
+        return ""
+    qty, risk_all = lot_position_size(abs(entry - sl), lot, contract)
+    if qty <= 0:
+        return ""
+    half_q, half_risk = qty / 2.0, risk_all / 2.0
+    dist = abs(entry - sl)
+    tp3 = float(getattr(signal, "tp3", 0) or 0) or float(getattr(signal, "tp2", 0) or 0) \
+        or float(getattr(signal, "tp1", 0) or 0)
+    t1 = tp3 or r_price(d, entry, sl, 3)
+    t2 = r_price(d, entry, sl, 4)
+    p1 = money_for_move(d, entry, t1, half_q) if t1 > 0 else dist * half_q * 3.0
+    p2 = money_for_move(d, entry, t2, half_q)
+    p2m = money_for_move(d, entry, r_price(d, entry, sl, 5), half_q)
+    total = p1 + p2
+    if total <= 0:
+        return ""
+    r_avg = (total / risk_all) if risk_all > 0 else 0.0
+    tot_m = total + (p2m - p2)
+    return (f"\U0001F3AF <b>Maqsadga yetsa: +{total:,.2f}$</b> "
+            f"(Lot 1 +{p1:,.2f}$ \u00B7 Lot 2 +{p2:,.2f}$ \u00B7 "
+            f"risk {half_risk * 2:,.2f}$ \u00B7 o'rtacha +{r_avg:,.2f}R)\n"
+            f"\U0001F680 Momentum bo'lsa (Lot 2 +5R): <b>+{tot_m:,.2f}$</b>")
+
+
+def lot_profit_text(pos) -> str:
+    """v79: bitta LOT uchun foyda — hozirgi hajm bo'yicha (qolgan lot bilan).
+
+    «maqsad 4,345.00 (+3R) · foyda +359.55$»
+    """
+    from app.engine.risk import money_for_move
+    d = str(getattr(pos, "direction", "") or "BUY").upper()
+    entry = float(getattr(pos, "entry", 0) or 0)
+    qty = float(getattr(pos, "qty_remaining", 0) or getattr(pos, "qty_total", 0) or 0)
+    target = float(getattr(pos, "tp3", 0) or getattr(pos, "tp2", 0) or 0)
+    if entry <= 0 or qty <= 0 or target <= 0:
+        return ""
+    money = money_for_move(d, entry, target, qty)
+    return f"maqsad {fmt_price(target)} \u00B7 \U0001F7E2 foyda {money:+,.2f}$"
 
 
 def lot_money_text(pos) -> str:
@@ -257,6 +389,7 @@ def format_signal_short(signal: Signal) -> str:
         f"<i>⏳ Amal muddati: {_expiry_text(signal)} — shundan keyin bozor narxida yopiladi.</i>\n"
         f"<i>📣 Natija (WIN/LOSE) kartasi TP yoki SL urilganda avtomatik keladi.</i>\n"
         f"<i>Tafsilot: «❓ Nega bu signal?»</i>"
+        + ("\n" + "\n".join(source_block(signal, full=False)) if source_block(signal) else "")
     )
 
 
@@ -289,6 +422,9 @@ def format_signal_full(signal: Signal) -> str:
         "📡 <b>Manba:</b>",
     ]
     lines.extend(f"   {l}" for l in strategy_vote_line(signal))
+    _sb = source_block(signal)
+    if _sb:
+        lines += _sb
 
     lines += [
         "",

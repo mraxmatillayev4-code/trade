@@ -89,11 +89,18 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         _qty = float(getattr(q, "qty_total", 0) or 0)
         _qlot = _qty / 100.0 if str(getattr(q, "symbol", "")).upper().startswith(
             ("XAU", "GOLD")) else _qty
+        _qrem = float(getattr(q, "qty_remaining", 0) or 0)
+        _tgt = float(getattr(q, "tp3", 0) or getattr(q, "tp2", 0) or 0)
+        # v79: foyda ham zarar kabi ANIQ hisoblanadi (qolgan hajm x narx farqi)
+        _prof = ""
+        if _tgt > 0 and _qrem > 0:
+            _pm = money_for_move(d, float(getattr(q, "entry", 0) or 0), _tgt, _qrem)
+            _prof = f" · 🎯 maqsad {fmt_price(_tgt)} · 🟢 +{_pm:,.2f}$"
         out.append(
             f"   📦 <b>{_nom}</b>: {_qlot:,.2f} lot · ochilish "
             f"<b>{fmt_price(float(getattr(q, 'entry', 0) or 0))}</b> · stop "
             f"{fmt_price(float(getattr(q, 'sl', 0) or 0))} · qolgan "
-            f"{float(getattr(q, 'qty_remaining', 0) or 0) / 100.0:,.2f} lot"
+            f"{_qrem / 100.0:,.2f} lot" + _prof
         )
     if price is None:
         out.append("   ⚠️ Joriy narx olinmadi (birja javob bermadi) — keyingi tsiklda qayta olinadi.")
@@ -109,6 +116,21 @@ async def _live_block(sig, positions: list, price: float | None) -> list[str]:
         _lots = _qty / 100.0
         out.append(f"   💵 <b>Hozirgi P/L: {_money:+,.2f}$</b> · hajm {_lots:,.2f} lot "
                    f"(1 lot = 100 oz)")
+        # v79: maqsadga yetsa qancha bo'ladi (har lot o'z darajasi bo'yicha)
+        _goal = 0.0
+        _parts: list[str] = []
+        for q in positions:
+            _t = float(getattr(q, "tp3", 0) or getattr(q, "tp2", 0) or 0)
+            _rq = float(getattr(q, "qty_remaining", 0) or 0)
+            if _t <= 0 or _rq <= 0:
+                continue
+            _pm = money_for_move(d, float(getattr(q, "entry", 0) or 0), _t, _rq)
+            _goal += _pm
+            _nm = "Lot2" if int(getattr(q, "stage", 0) or 0) >= 10 else "Lot1"
+            _parts.append(f"{_nm} +{_pm:,.2f}$")
+        if _goal:
+            out.append(f"   🎯 <b>Maqsadga yetsa: +{_goal:,.2f}$</b>"
+                       + (" (" + " · ".join(_parts) + ")" if _parts else ""))
     except Exception:  # noqa: BLE001
         pass
     # Darajalar: +1R/+2R/+3R — signalning o'z narxlari, +4R/+5R — R dan hisoblanadi
@@ -180,8 +202,20 @@ async def _track_view(uid: int) -> tuple[str, list[tuple[str, str]]]:
         if chk_any is not None:
             age = max(0, int((datetime.now(timezone.utc) - chk_any).total_seconds()))
             alive = f"\n\u23F1 Oxirgi sham tekshiruvi: {format_tashkent(chk_any)} \u00B7 {age} s oldin"
+        _wd_lines: list[str] = []
+        try:
+            from app.core.config import get_settings as _gs2
+            from app.services import watchdog as _wd2
+            _st2 = _gs2()
+            _wd_lines = ["\U0001F4E1 <b>Kuzatuv holati</b>"] + [
+                "   " + x for x in _wd2.status_lines(symbols=_st2.symbol_list,
+                                                     timeframes=["1m"])]
+            _wd_lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+        except Exception:  # noqa: BLE001
+            _wd_lines = []
         return ("\U0001F50E <b>JONLI KUZATUV</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "Hozir ochiq bitim yo'q \u2014 yopadigan lot ham yo'q.\n"
+                + ("\n".join(_wd_lines) + "\n" if _wd_lines else "")
+                + "Hozir ochiq bitim yo'q \u2014 yopadigan lot ham yo'q.\n"
                 "Yangi signal kelganda shu yerga darajalar bilan chiqadi va shu yerda "
                 "\u00AB\u2705 Yopish\u00BB tugmasi paydo bo'ladi.\n"
                 "Kuzatuv har 1m sham yopilganda avtomatik tekshiriladi, "
@@ -192,6 +226,18 @@ async def _track_view(uid: int) -> tuple[str, list[tuple[str, str]]]:
         by_sig.setdefault(p.signal_id, []).append(p)
 
     lines = ["\U0001F50E <b>JONLI KUZATUV</b>", "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"]
+    # v81: bozor kuzatuvi holati (oqim tirikmi, sham kechikishi)
+    try:
+        from app.core.config import get_settings as _gs
+        from app.services import watchdog as _wd
+        _st = _gs()
+        _open_syms = {str(getattr(s, "symbol", "") or "").upper() for s in sigs.values()}
+        lines.append("\U0001F4E1 <b>Kuzatuv holati</b>")
+        lines.extend("   " + x for x in _wd.status_lines(
+            symbols=_st.symbol_list, timeframes=["1m"], open_symbols=_open_syms))
+        lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[KUZAT] watchdog holati: %s", exc)
     buttons: list[tuple[str, str]] = []
     money_all = 0.0
     for sid, positions in by_sig.items():
@@ -316,6 +362,27 @@ async def explain(callback: CallbackQuery) -> None:
         if signal is None:
             await callback.answer("Signal topilmadi", show_alert=True)
             return
+    # v81: manba to'liq bo'lmasa arxivdan (channel_messages) to'ldiramiz
+    try:
+        if not (getattr(signal, "source_text", "") or getattr(signal, "source_ocr", "")):
+            from app.services import channel_archive
+            row = await channel_archive.fetch_msg(
+                int(getattr(signal, "source_msg_id", 0) or 0),
+                username=getattr(signal, "source_username", "") or None,
+            )
+            if row:
+                if row.get("body") and not getattr(signal, "source_text", ""):
+                    signal.source_text = str(row["body"])[:1500]
+                if row.get("ocr") and not getattr(signal, "source_ocr", ""):
+                    signal.source_ocr = str(row["ocr"])[:900]
+                if row.get("date") and not getattr(signal, "source_posted_at", None):
+                    signal.source_posted_at = row["date"]
+                if row.get("username") and not getattr(signal, "source_username", ""):
+                    signal.source_username = str(row["username"])
+                if row.get("title") and not getattr(signal, "source_channel", ""):
+                    signal.source_channel = str(row["title"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SIG] arxiv manbasi: %s", exc)
     # To'liq tafsilot sahifasi; "Signalga qaytish" tugmasi qisqa kartaga qaytaradi
     await callback.message.edit_text(
         format_signal_full(signal),
