@@ -1,4 +1,4 @@
-"""Markaziy konfiguratsiya — barcha parametrlar .env orqali boshqariladi."""
+﻿"""Markaziy konfiguratsiya — barcha parametrlar .env orqali boshqariladi."""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -7,6 +7,20 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.enums import QualityMode
+
+
+def _clean_url(v) -> str:
+    """v87: env qiymatidagi qo'shtirnoq/bo'sh joy/satr belgilarini olib tashlaydi.
+
+    Tez-tez uchraydigan xato: Render'da `DATABASE_URL` ga qiymat qo'shtirnoq
+    bilan yoki oxirida bo'sh joy bilan qo'yiladi -> host topilmaydi
+    («Name or service not known»).
+    """
+    s = str(v or "")
+    s = s.replace("\r", "").replace("\n", "").replace("\t", " ").strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s.strip().strip('"').strip("'").strip()
 
 
 class Settings(BaseSettings):
@@ -30,6 +44,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # --- Binance ---
+    # v102: Gemini AI kaliti (user bergan). Render env GEMINI_API_KEY bo'lsa shu ustun; bo'lmasa kod ichidagi zaxira ishlaydi.
+    gemini_api_key: str = ""
     binance_api_key: str = ""
     binance_api_secret: str = ""
     binance_base_url: str = "https://api.binance.com"
@@ -37,7 +53,7 @@ class Settings(BaseSettings):
 
     # --- Kuzatuv ro'yxati (forex + oltin + kumush + neft + bitcoin) ---
     # EURUSDT=EUR/USD, XAUUSDT=Oltin, SILVERUSDT=Kumush(XAG), USOILUSDT=Neft(WTI), BTCUSDT
-    symbols: str = "EURUSDT,BTCUSDT,XAUUSDT,SILVERUSDT,USOILUSDT,UKOILUSDT"
+    symbols: str = "XAUUSDT"  # v129: faqat oltin, boshqalar kodda qoladi, bozordan uzildi
     # 30m backtest'da zaif chiqdi — standart kuzatuvdan olib tashlandi (xohlasangiz qo'shing)
     timeframes: str = "5m,15m,1h,4h"
 
@@ -105,7 +121,17 @@ class Settings(BaseSettings):
     tp1_r: float = 1.0
     tp2_r: float = 2.0
     tp3_r: float = 3.0
-    risk_percent: float = 1.0
+    # v82: risk/money management — hajm balansning shu foizidan hisoblanadi
+    risk_percent: float = 0.5
+    # v86: standart lot hajmi (qo'lda tanlash) — foiz o'rniga
+    default_lot: float = 0.01
+    # === v68: HAJM (lot) va pul hisobi — terminaldagi kabi ===
+    lot_size: float = 1.0                 # v82: hajm uchun YUQORI chegara (max lot)
+    # --- v84: KIRISH NUQTASI (entry engine) ---
+    entry_enabled: bool = True            # rejim: narx kelgandagina savdo ochiladi
+    entry_wait_minutes: int = 60          # v124: 15 / 30 / 60 / 120; standart 60 daq
+    entry_cooldown_minutes: int = 15      # SL dan keyin qarama-qarshi tomonga tanaffus
+    contract_size: float = 100.0          # 1 lot XAU = 100 oz (pul = narx farqi x 100 x lot)
     paper_initial_balance: float = 10_000.0
 
     # --- Signal qoidalari ---
@@ -113,6 +139,18 @@ class Settings(BaseSettings):
     # yuqori chegara YO'Q — 30-50 ta bo'lsa ham yuborilaveradi).
     signal_cooldown_minutes: int = 15
     signal_expiry_candles: int = 36
+
+    # --- Kanal signallari (asosan 1m OLTIN) ---
+    channel_timeframe: str = "1m"        # kanal signali yozilmagan bo'lsa shu TF
+    channel_use_post_tp: bool = True     # kanal o'zi yozgan TP larni ishlatish
+    channel_expiry_minutes: int = 240    # M1 signal shu daqiqada yopilmasa: muddat tugadi
+    max_active_signals: int = 3           # v67: BIR YO'NALISH uchun maks. faol signal
+    #   Bir vaqtda faqat BITTA yo'nalish ishlaydi: qarama-qarshi yo'nalish signali
+    #   olinmaydi (real savdoda 2 SELL + 1 BUY birga o'ynalmaydi).
+    expiry_sweep_seconds: int = 300      # muddat tekshiruvi davri (sekund)
+    # v56: kanal yangi ulanganda TARIX o'qilmaydi (0 = umuman o'qilmasin).
+    # 2 qilsangiz — oxirgi 2 ta eski xabar o'qiladi (odatda kerak emas).
+    channel_catchup_count: int = 0
     multi_timeframe_enabled: bool = True
     store_candles: bool = True
     # Ixtiyoriy tashqi AI (Groq/OpenAI mos). Bo'sh = faqat mahalliy AI.
@@ -143,8 +181,13 @@ class Settings(BaseSettings):
     # ---- Qulaylik xossalari ----
     @property
     def database_url_async(self) -> str:
-        """Render/Heroku `postgresql://` yoki `postgres://` ni asyncpg'ga moslaydi."""
-        url = self.database_url
+        """Render/Heroku `postgresql://` yoki `postgres://` ni asyncpg'ga moslaydi.
+
+        v87: qiymat TOZALANADI — ko'chirishda qo'shilib qolgan qo'shtirnoq,
+        bo'sh joy, satr ko'chirish belgilari olib tashlanadi (tez-tez uchraydigan
+        xato: «postgres://...» yoki oxirida bo'sh joy bo'lishi).
+        """
+        url = _clean_url(self.database_url)
         for prefix in ("postgresql+asyncpg://", "postgresql+psycopg2://",
                        "postgresql://", "postgres://"):
             if url.startswith(prefix) and prefix != "postgresql+asyncpg://":
@@ -157,7 +200,11 @@ class Settings(BaseSettings):
 
     @property
     def symbol_list(self) -> list[str]:
-        return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        # OLTIN har doim kuzatiladi (kanallar asosan oltin beradi)
+        syms = [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        if "XAUUSDT" not in syms:
+            syms.insert(0, "XAUUSDT")
+        return syms
 
     @property
     def timeframe_list(self) -> list[str]:
@@ -170,6 +217,15 @@ class Settings(BaseSettings):
         if "1m" not in tfs:
             tfs = ["1m"] + tfs
         return tfs
+
+    def expiry_minutes_for(self, timeframe: str, quality_mode: str = "") -> int:
+        """Signal muddati (daqiqa). Kanal M1 signallari uchun alohida sozlama."""
+        tf = (timeframe or "1m").lower()
+        if (quality_mode or "").upper() == "CHANNEL":
+            return max(5, int(self.channel_expiry_minutes))
+        per_tf = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+                  "1h": 60, "4h": 240, "1d": 1440}.get(tf, 15)
+        return max(10, per_tf * max(1, int(self.signal_expiry_candles)))
 
     @property
     def active_strategy_keys(self) -> list[str]:
@@ -201,7 +257,6 @@ class Settings(BaseSettings):
             "obv": self.weight_obv,
             "cvd": self.weight_cvd,
             "wavetrend": 1.2,
-            "squeeze_breakout": self.weight_squeeze,
             "brain": self.weight_brain,
         }
 
@@ -222,3 +277,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+

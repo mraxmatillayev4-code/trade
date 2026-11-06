@@ -7,6 +7,7 @@ from datetime import date as _date
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.state import State, StatesGroup, default_state
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards as kb
@@ -36,10 +37,18 @@ class ReportsState(StatesGroup):
 
 
 def _parse_token(token: str) -> tuple[str, _date | None, str]:
-    """'daily' | 'weekly' | 'monthly' | 'date:YYYY-MM-DD' -> (period, target_date, label)."""
+    """'daily' | 'weekly' | 'monthly' | 'date:/wdate:/mdate:YYYY-MM-DD'
+    -> (period, target_date, label)."""
     if token.startswith("date:"):
         d = parse_date_input(token.split(":", 1)[1])
         return "daily", d, (f"🔎 {d.strftime('%d.%m.%Y')} HISOBOTI" if d else "SANA")
+    # v114: avto-haftalik/oylik hisobot TUGAGAN davr sanasini tugmada saqlaydi
+    if token.startswith("wdate:"):
+        d = parse_date_input(token.split(":", 1)[1])
+        return "weekly", d, "🗓 HAFTALIK HISOBOT"
+    if token.startswith("mdate:"):
+        d = parse_date_input(token.split(":", 1)[1])
+        return "monthly", d, "📆 OYLIK HISOBOT"
     period = token if token in _PERIOD_LABEL else "daily"
     return period, None, _PERIOD_LABEL[period]
 
@@ -128,6 +137,11 @@ async def date_cancel(message: Message, state) -> None:
 
 @router.message(ReportsState.awaiting_date, F.text)
 async def report_for_date(message: Message, state) -> None:
+    # v111: menyu tugmasi bosilsa — sana holatidan chiqadi
+    from app.bot.keyboards import is_menu_text
+    if is_menu_text(getattr(message, "text", None)):
+        await state.clear()
+        raise SkipHandler()
     raw = (message.text or "").strip()
     if raw in _BTN_PERIOD:
         await state.set_state(ReportsState.menu)

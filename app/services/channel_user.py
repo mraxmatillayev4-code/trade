@@ -2,9 +2,32 @@
 
 Sessiya SystemLog(component='tg_session') da saqlanadi (yangi jadval YO'Q).
 API_ID/HASH: .env yoki SystemLog('tg_api').
+
+v53 qo'shimchasi (QR bilan ulash):
+  * Kod umuman kelmayotganda (Telegram cheklovi) akkaunt `tg://login` havola /
+    QR rasm bilan ulanadi — SMS ham, kod ham kerak emas.
+  * Token ~30 soniyada eskiradi: `qr_step()` yangi havola/QR qaytaradi.
+  * 2FA bo'lsa `qr_password()` parol bilan yakunlaydi.
+
+v52 tuzatishlari (Telegram kod yuborishni rad etganda):
+  * `SendCodeUnavailableError` ("all available options ... already used") tushunarli
+    o'zbekcha matnga aylantiriladi + qancha kutish kerakligi aytiladi.
+  * Ketma-ket kod so'rashga 60 soniya "sovutish" (cooldown) — flood kuchaymasin.
+  * Xato bo'lsa ESKI kod hash saqlanib qoladi (kelgan kod ishlayveradi).
+  * `sms` endi: Telethon force_sms ishlamaydi -> qo'shimcha "qayta yuborish" urinishi.
+
+v51 tuzatishlari (kod kelmayapti / akkaunt chiqib ketdi muammolari):
+  * Kod QANDAY yuborilgani aytiladi (ilova / SMS / qo'ng'iroq) — Telegram yangi
+    api_id bilan ko'pincha SMS yubormaydi, kodni Telegram ilovasiga yozadi.
+  * `sms` so'zi bilan majburiy SMS (force_sms=True) so'raladi.
+  * FloodWait aniq daqiqa bilan ko'rsatiladi (necha daqiqa kutish kerak).
+  * Kodni qayta so'rash FAQAT foydalanuvchi "qayta" desa bo'ladi.
+  * `session_status()` — saqlangan sessiya tirikmi yoki o'chganmi (get_me bilan).
 """
 from __future__ import annotations
 
+import asyncio
+import time
 import unicodedata
 
 from app.core.config import get_settings
@@ -24,6 +47,8 @@ PENDING_COMPONENT = "tg_pending"
 _pending = None  # TelegramClient during login
 _phone = ""
 _code_hash = ""
+_delivery = ""   # kod qanday yuborildi: app | sms | call | flash
+_last_request_ts = 0.0   # oxirgi kod so'rovi vaqti (cooldown uchun)
 
 _CLIENT_KW = dict(
     device_model="Desktop",
@@ -64,12 +89,53 @@ def _clean_password(text: str | None) -> str:
     return p.translate(_CYR_LAT)
 
 
+def flood_seconds(exc: BaseException) -> int:
+    """FloodWaitError ichidan kutish sekundini oladi."""
+    sec = int(getattr(exc, "seconds", 0) or 0)
+    if sec:
+        return sec
+    import re
+    m = re.search(r"(\d+)\s*second", str(exc) or "", re.I)
+    return int(m.group(1)) if m else 0
+
+
+def _wait_text(sec: int) -> str:
+    if sec <= 0:
+        return "Biroz kutib qayta urinib ko'ring."
+    if sec < 60:
+        return f"{sec} soniya kutib, <b>qayta</b> yozing."
+    mins = sec // 60
+    if mins < 60:
+        return f"{mins} daqiqa kutib, <b>qayta</b> yozing."
+    return f"{mins // 60} soat {mins % 60} daqiqa kutib, <b>qayta</b> yozing."
+
+
 def _human_err(exc: BaseException) -> str:
     name = type(exc).__name__
     text = str(exc)
     low = f"{name} {text}".lower()
+    if ("sendcodeunavailable" in low or "all available options" in low
+            or "send_code_unavailable" in low):
+        return (
+            "Telegram hozir bu raqamga yangi kod yubormayapti "
+            "(barcha yuborish usullari ishlatilgan).\n"
+            "Odatda bu cheklov 30 daqiqadan 24 soatgacha turadi.\n"
+            "Nima qilish kerak:\n"
+            "1) Telegram ilovangizda <b>«Telegram»</b> chatini ochib ko'ring — "
+            "kod o'sha yerga kelgan bo'lishi mumkin (u xabar o'chib ketmaydi).\n"
+            "2) 30-60 daqiqa kutib, keyin <b>qayta</b> deb yozing.\n"
+            "3) Kutish davomida kod so'ramang — har urinish cheklovni uzaytiradi.\n"
+            "4) Akkaunt kerak bo'lmasa: kanalga botni admin qilib qo'shsangiz, "
+            "postlar botga to'g'ridan-to'g'ri keladi."
+        )
     if "flood" in low:
-        return "Telegram kutish qo'ydi. 5–10 daqiqa keyin /akkaunt."
+        return ("Telegram juda ko'p urinish uchun kutish qo'ydi — "
+                + _wait_text(flood_seconds(exc))
+                + "\n(Tez-tez kod so'ramang: har urinish kutishni uzaytiradi.)")
+    if "api_id" in low or "api id" in low:
+        return "api_id/api_hash noto'g'ri. my.telegram.org dan qiymatlarni qayta oling."
+    if "phone_number_banned" in low or "number banned" in low:
+        return "Bu raqam Telegram tomonidan cheklangan."
     if "phone" in low and "invalid" in low:
         return "Telefon raqam noto'g'ri. +998... formatida yuboring."
     if "banned" in low:
@@ -79,6 +145,74 @@ def _human_err(exc: BaseException) -> str:
     if "invalid" in low and "code" in low:
         return "Kod noto'g'ri."
     return text[:240]
+
+
+_DELIVERY_TEXT = {
+    "app": ("📲 Kod <b>Telegram ilovasiga</b> keldi (Telegram xizmatidan xabar).\n"
+            "Telegram yangi api_id uchun ko'p hollarda SMS yubormaydi.\n"
+            "Boshqa telefonda/kompyuterda Telegram ochiq bo'lsa — o'sha yerdagi "
+            "<b>Telegram</b> chatidan kodni oling.\n"
+            "SMS kerak bo'lsa: <b>sms</b> deb yozing."),
+    "sms": "📩 Kod <b>SMS</b> orqali yuborildi.",
+    "call": "📞 Kod <b>qo'ng'iroq</b> orqali aytiladi (qo'ng'iroqni qabul qiling).",
+    "flash": "📞 Kod <b>qisqa qo'ng'iroq</b> orqali keladi.",
+    "unknown": "📲 Kod yuborildi (Telegram ilovasi yoki SMS).",
+}
+
+
+def delivery_of(res) -> str:
+    """SentCode.type dan kod qanday yuborilganini aniqlaydi."""
+    tname = type(getattr(res, "type", None)).__name__.lower()
+    if "app" in tname:
+        return "app"
+    if "call" in tname and "flash" in tname:
+        return "flash"
+    if "call" in tname:
+        return "call"
+    if "sms" in tname:
+        return "sms"
+    return "unknown"
+
+
+def delivery_text(kind: str) -> str:
+    return _DELIVERY_TEXT.get(kind or "unknown", _DELIVERY_TEXT["unknown"])
+
+
+async def session_status() -> dict:
+    """Saqlangan sessiya tirikmi? (Telegram uni bekor qilgan bo'lishi mumkin.)"""
+    out = {"has_api": False, "has_session": False, "alive": False,
+           "account": "", "channels": 0, "error": ""}
+    try:
+        api_id, api_hash, session = await credentials()
+        out["has_api"] = bool(api_id and api_hash)
+        out["has_session"] = bool(session)
+        if not (api_id and api_hash and session):
+            return out
+        client = make_client(session, api_id, api_hash)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                out["error"] = "sessiya o'chgan (Telegram bekor qilgan)"
+                return out
+            me = await client.get_me()
+            uname = getattr(me, "username", "") or ""
+            phone = getattr(me, "phone", "") or ""
+            out["alive"] = True
+            out["account"] = f"@{uname}" if uname else (phone or str(getattr(me, "id", "")))
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            from app.services.channel_store import list_channels
+            async with async_session_factory() as db:
+                out["channels"] = len(await list_channels(db))
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"[:160]
+    return out
 
 
 async def credentials() -> tuple[int, str, str]:
@@ -108,6 +242,14 @@ async def save_session(session_str: str) -> None:
         await save_json_log(db, SESSION_COMPONENT, {"session": session_str})
         await save_json_log(db, PENDING_COMPONENT, {})
 
+    # v83: sessiya saqlanishi bilan zaxira guard ham yangilanadi
+    try:
+        from app.services import persist as _persist
+        await _persist.save_guard()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[PERSIST] guard (sessiya): %s", exc)
+
+
 
 async def clear_session() -> None:
     async with async_session_factory() as db:
@@ -130,7 +272,8 @@ async def _dump_pending() -> None:
         await save_json_log(
             db,
             PENDING_COMPONENT,
-            {"session": sess, "phone": _phone, "code_hash": _code_hash},
+            {"session": sess, "phone": _phone, "code_hash": _code_hash,
+             "delivery": _delivery},
         )
 
 
@@ -146,7 +289,7 @@ async def _drop_client() -> None:
 
 
 async def _ensure_pending() -> bool:
-    global _pending, _phone, _code_hash
+    global _pending, _phone, _code_hash, _delivery
     if _pending is not None:
         try:
             if not _pending.is_connected():
@@ -165,52 +308,150 @@ async def _ensure_pending() -> bool:
         _pending = client
         _phone = str(row.get("phone") or "")
         _code_hash = str(row.get("code_hash") or "")
+        _delivery = str(row.get("delivery") or "")
         return True
     except Exception as exc:  # noqa: BLE001
         logger.exception("[TG-USER] pending restore: %s", exc)
         return False
 
 
-async def start_login(api_id: int, api_hash: str, phone: str) -> str:
-    """Kod yuboriladi. Xato matnini qaytaradi (bo'sh = OK)."""
-    global _pending, _phone, _code_hash
+async def start_login(api_id: int, api_hash: str, phone: str,
+                      force_sms: bool = False) -> tuple[str, str]:
+    """Kod yuboriladi. (xato_matni, yetkazish_turi) qaytaradi."""
+    global _pending, _phone, _code_hash, _delivery, _last_request_ts
     try:
         import telethon  # noqa: F401
     except ImportError:
-        return "Telethon o'rnatilmagan. Deploy qiling."
+        return "Telethon o'rnatilmagan. Deploy qiling.", ""
     await save_api(api_id, api_hash)
     phone = phone.strip()
+    left = cooldown_left()
+    if left > 0 and _phone == phone:
+        return (f"⏳ Kod yaqinda so'ralgan. Yana {left} soniya kutib, "
+                f"<b>qayta</b> deb yozing.", "")
     await _drop_client()
     try:
         client = make_client("", int(api_id), api_hash)
         await client.connect()
-        result = await client.send_code_request(phone)
+        if force_sms:
+            try:
+                result = await client.send_code_request(phone, force_sms=True)
+            except TypeError:
+                result = await client.send_code_request(phone)
+        else:
+            result = await client.send_code_request(phone)
         _pending = client
         _phone = phone
         _code_hash = result.phone_code_hash
+        _delivery = delivery_of(result)
+        _last_request_ts = time.time()
+        kind = _delivery
         await _dump_pending()
-        logger.info("[TG-USER] kod yuborildi: %s", phone[-4:])
-        return ""
+        logger.info("[TG-USER] kod yuborildi: %s (yetkazish=%s, force_sms=%s)",
+                    phone[-4:], kind, force_sms)
+        return "", kind
     except Exception as exc:  # noqa: BLE001
         logger.exception("[TG-USER] login start: %s", exc)
         await _drop_client()
-        return f"Kod yuborilmadi: {_human_err(exc)}"
+        return f"Kod yuborilmadi: {_human_err(exc)}", ""
 
 
-async def resend_code() -> str:
-    """Yangi kod so'raydi. Bo'sh = OK."""
-    global _code_hash
-    if not await _ensure_pending():
-        return "Sessiya yo'q. /akkaunt bilan qayta boshlang."
+COOLDOWN_SECONDS = 60
+
+
+def _clear_cached_hash(client, phone: str) -> None:
+    """Telethon keshidagi eski phone_code_hash ni o'chiradi.
+
+    Keshda hash bo'lsa Telethon `send_code_request` ichida ResendCodeRequest
+    yuboradi va Telegram uni "all available options ... already used" bilan
+    rad etadi (yangi kod umuman kelmaydi). Kesh tozalansa keyingi so'rov
+    HAQIQIY yangi kod so'rovi (SendCodeRequest) bo'ladi.
+    """
     try:
-        result = await _pending.send_code_request(_phone)
-        _code_hash = result.phone_code_hash
+        cache = getattr(client, "_phone_code_hash", None)
+        if isinstance(cache, dict):
+            cache.pop(phone, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def cooldown_left() -> int:
+    """Kod so'rashga qolgan "sovutish" vaqti (sekund)."""
+    if not _last_request_ts:
+        return 0
+    left = COOLDOWN_SECONDS - int(time.time() - _last_request_ts)
+    return left if left > 0 else 0
+
+
+async def resend_code(force_sms: bool = False) -> tuple[str, str]:
+    """Yangi kod so'raydi. (xato_matni, yetkazish_turi).
+
+    force_sms: Telethon'da endi ishlamaydi (deprecated) — shuning uchun bu
+    "qo'shimcha urinish" (ResendCodeRequest yo'li) sifatida ishlaydi.
+    Xato bo'lsa ESKI kod hash saqlanadi — kelgan kod ishlayveradi.
+    """
+    global _code_hash, _delivery, _last_request_ts
+    if not await _ensure_pending():
+        return "Sessiya yo'q. /akkaunt bilan qayta boshlang.", ""
+    left = cooldown_left()
+    if left > 0:
+        return (f"⏳ Juda tez. Yana {left} soniya kutib, <b>qayta</b> yozing.\n"
+                "(Ketma-ket so'rov Telegramda cheklov qo'zg'atadi.)", "")
+    old_hash, old_delivery = _code_hash, _delivery
+    try:
+        result = None
+        if force_sms:
+            # Telethon force_sms ni qo'llamaydi — to'g'ridan-to'g'ri ResendCodeRequest
+            if _code_hash:
+                try:
+                    from telethon.tl.functions.auth import ResendCodeRequest
+                    result = await _pending(ResendCodeRequest(_phone, _code_hash))
+                    try:  # Telethon keshini ham yangilab qo'yamiz
+                        _pending._phone_code_hash[_phone] = result.phone_code_hash
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    logger.info("[TG-USER] ResendCodeRequest ishlamadi — yangi so'rov")
+                    result = None
+        if result is None:
+            try:
+                result = await _pending.send_code_request(_phone)
+            except Exception as exc:  # noqa: BLE001
+                if not _code_hash and not getattr(_pending, "_phone_code_hash", None):
+                    raise
+                # Keshdagi eski hash sabab Telegram rad etdi — keshni tozalab,
+                # HAQIQIY yangi kod so'rovi bilan oxirgi marta urinamiz.
+                logger.info("[TG-USER] kesh tozalanib yangi so'rov: %s", exc)
+                _clear_cached_hash(_pending, _phone)
+                result = await _pending.send_code_request(_phone)
+        _code_hash = result.phone_code_hash or _code_hash
+        _delivery = delivery_of(result)
+        _last_request_ts = time.time()
         await _dump_pending()
-        logger.info("[TG-USER] kod qayta yuborildi")
-        return ""
+        logger.info("[TG-USER] kod qayta yuborildi (yetkazish=%s, urinish=%s)",
+                    _delivery, "sms" if force_sms else "oddiy")
+        return "", _delivery
     except Exception as exc:  # noqa: BLE001
         logger.exception("[TG-USER] resend: %s", exc)
-        return f"Yangi kod kelmadi: {_human_err(exc)}"
+        # eski kod hash tiklanadi — avval kelgan kod ishlayveradi
+        _code_hash, _delivery = old_hash, old_delivery
+        await _dump_pending()
+        return f"Yangi kod kelmadi: {_human_err(exc)}", ""
+
+
+async def pending_info() -> dict:
+    """Kutilayotgan login: telefon, yetkazish turi, qolgan cooldown."""
+    out = {"phone": "", "delivery": "", "cooldown": cooldown_left()}
+    if await _ensure_pending():
+        out["phone"] = _phone
+        out["delivery"] = _delivery
+        out["cooldown"] = cooldown_left()
+        return out
+    async with async_session_factory() as db:
+        row = await load_json_log(db, PENDING_COMPONENT)
+    out["phone"] = str(row.get("phone") or "")
+    out["delivery"] = str(row.get("delivery") or "")
+    return out
 
 
 async def twofa_hint() -> str:
@@ -272,10 +513,8 @@ async def finish_login(code: str, password: str | None = None) -> str:
                     return "2FA_NEEDED"
                 await _try_passwords(password)
             except PhoneCodeExpiredError:
-                err = await resend_code()
-                if err:
-                    return f"Kod eskirgan. {err}"
-                return "EXPIRED_RESENT"
+                # v51: o'zi qayta so'ramaydi (flood bo'lmasin) — foydalanuvchi "qayta" yozadi
+                return "EXPIRED"
             except PhoneCodeInvalidError:
                 return "INVALID"
         sess = _pending.session.save()
@@ -293,7 +532,163 @@ async def finish_login(code: str, password: str | None = None) -> str:
             await _dump_pending()
             return "2FA_NEEDED"
         if "expired" in low:
-            err = await resend_code()
-            if not err:
-                return "EXPIRED_RESENT"
+            return "EXPIRED"
         return f"Kirish xato: {_human_err(exc)}"
+
+
+# === v53: QR bilan ulash (kod kelmayotganda eng ishonchli yo'l) ==============
+#
+# Telegram kod yuborishni cheklab qo'yganda (SendCodeUnavailable / jim cheklov)
+# akkauntni ulashning yagona yo'li — QR:
+#   1) bot `tg://login?token=...` havola + QR rasm yuboradi;
+#   2) foydalanuvchi Telegram ilovasida havolani bosadi (yoki QR ni boshqa
+#      qurilma bilan skanerlaydi) -> Telegram "kirishni tasdiqlaysizmi?" so'raydi;
+#   3) tasdiqlansa sessiya darhol saqlanadi (SMS/kod kerak emas).
+# Token ~30 soniyada eskiradi -> `qr_step()` TimeoutError bo'lsa `recreate()`
+# qilib YANGI havola qaytaradi (Telegram Desktop ham shunday qiladi).
+
+_qr_client = None
+_qr_obj = None
+_qr_state = ""
+
+
+def _qr_png(url: str) -> bytes | None:
+    """`tg://login?...` havolani QR rasmga (PNG) aylantiradi."""
+    try:
+        import io
+
+        import qrcode  # requirements.txt da (pillow bor)
+
+        img = qrcode.make(url)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[TG-QR] QR rasm yasalmadi: %s", exc)
+        return None
+
+
+def qr_active() -> bool:
+    """QR oqimi kutilyaptimi."""
+    return _qr_obj is not None
+
+
+async def qr_cancel() -> None:
+    """QR oqimini to'xtatadi (klient uziladi)."""
+    global _qr_client, _qr_obj, _qr_state
+    client = _qr_client
+    _qr_client = None
+    _qr_obj = None
+    _qr_state = ""
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def qr_begin() -> dict:
+    """QR ulashni boshlaydi: {"err": str, "link": str, "qr": bytes|None}."""
+    global _qr_client, _qr_obj, _qr_state
+    api_id, api_hash, _sess = await credentials()
+    if not api_id or not api_hash:
+        # v83: zaxira (guard) dan avtomatik tiklashga urinib ko'ramiz
+        try:
+            from app.services import persist as _persist
+            await _persist.restore_if_missing()
+            api_id, api_hash, _sess = await credentials()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[QR] guard tiklash: %s", exc)
+    if not api_id or not api_hash:
+        return {"err": ("api_id/api_hash yo'q. Ularni 2 qadamda kiritamiz "
+                        "(/qr yoki /akkaunt) yoki Render sozlamalarida "
+                        "TELEGRAM_API_ID va TELEGRAM_API_HASH ni qo'ying "
+                        "(my.telegram.org -> API development tools)."),
+                "link": "", "qr": None}
+    await qr_cancel()
+    try:
+        client = make_client("", int(api_id), api_hash)
+        await client.connect()
+        qr = await client.qr_login()
+        _qr_client, _qr_obj, _qr_state = client, qr, "wait"
+        logger.info("[TG-QR] boshlandi")
+        return {"err": "", "link": qr.url, "qr": _qr_png(qr.url)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[TG-QR] boshlanmadi: %s", exc)
+        await qr_cancel()
+        return {"err": f"QR boshlanmadi: {_human_err(exc)}", "link": "", "qr": None}
+
+
+async def _qr_finish(user) -> dict:
+    """Sessiyani saqlaydi (QR tasdig'i yoki 2FA parolidan keyin)."""
+    account = ""
+    try:
+        uname = getattr(user, "username", None)
+        account = f"@{uname}" if uname else str(getattr(user, "id", "") or "")
+    except Exception:  # noqa: BLE001
+        account = ""
+    try:
+        sess = _qr_client.session.save()
+    except Exception:  # noqa: BLE001
+        sess = ""
+    await qr_cancel()
+    if not sess:
+        return {"state": "error", "msg": "Sessiya saqlanmadi. /qr bilan qayta urinib ko'ring."}
+    await save_session(sess)
+    logger.info("[TG-QR] akkaunt ulandi: %s", account or "-")
+    return {"state": "ok", "account": account}
+
+
+async def qr_step() -> dict:
+    """Token tasdiqlanishini kutadi.
+
+    state: ok (ulandi) | new (havola eskirdi, yangisi) | password (2FA kerak) |
+           error (xato/xato matni).
+    """
+    global _qr_state
+    if _qr_obj is None or _qr_client is None:
+        return {"state": "error", "msg": "QR oqimi yo'q. /qr bilan qayta boshlang."}
+    try:
+        user = await _qr_obj.wait()
+    except asyncio.TimeoutError:
+        qr = _qr_obj
+        if qr is None:                       # shu orada to'xtatilgan
+            return {"state": "error", "msg": "QR oqimi to'xtatilgan."}
+        try:
+            await qr.recreate()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[TG-QR] yangilash: %s", exc)
+            msg = _human_err(exc)
+            await qr_cancel()
+            return {"state": "error", "msg": msg}
+        if _qr_obj is None:                  # recreate paytida to'xtatilgan
+            return {"state": "error", "msg": "QR oqimi to'xtatilgan."}
+        return {"state": "new", "link": qr.url, "qr": _qr_png(qr.url)}
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ == "SessionPasswordNeededError":
+            _qr_state = "password"
+            logger.info("[TG-QR] 2FA parol kerak")
+            return {"state": "password"}
+        logger.exception("[TG-QR] kutish: %s", exc)
+        msg = _human_err(exc)
+        await qr_cancel()
+        return {"state": "error", "msg": msg}
+    return await _qr_finish(user)
+
+
+async def qr_password(password: str) -> str:
+    """2FA paroli bilan QR ulashni yakunlaydi. '' = OK, '2FA_WRONG' = parol xato."""
+    if _qr_client is None:
+        return "QR oqimi yo'q. /qr bilan qayta boshlang."
+    try:
+        await _qr_client.sign_in(password=_clean_password(password))
+        me = await _qr_client.get_me()
+    except Exception as exc:  # noqa: BLE001
+        low = f"{type(exc).__name__} {exc}".lower()
+        if "password" in low or "hash value" in low:
+            logger.info("[TG-QR] 2fa parol mos kelmadi")
+            return "2FA_WRONG"
+        logger.exception("[TG-QR] 2fa: %s", exc)
+        return _human_err(exc)
+    res = await _qr_finish(me)
+    return "" if res.get("state") == "ok" else str(res.get("msg") or "Xato")

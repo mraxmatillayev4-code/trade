@@ -37,8 +37,8 @@ def test_aggregate_all_buy(uptrend_df, settings):
         _res("breakout", Direction.BUY, 9),
         _res("divergence", Direction.NEUTRAL, 0),
     ]
-    d = run_async(aggregate(results, MarketRegime.TRENDING, MTFAlignment.ALIGNED,
-                  [("1h", Direction.BUY)], settings, "15m"))
+    d = aggregate(results, MarketRegime.TRENDING, MTFAlignment.ALIGNED,
+                  [("1h", Direction.BUY)], settings, "15m")
     assert d.direction == Direction.BUY
     assert d.score >= 7
     assert d.passes_threshold is True
@@ -52,22 +52,22 @@ def test_aggregate_equal_no_signal(settings):
         _res("breakout", Direction.SELL, 8),
         _res("divergence", Direction.NEUTRAL, 0),
     ]
-    d = run_async(aggregate(results, MarketRegime.RANGING, MTFAlignment.NONE, [], settings, "15m"))
+    d = aggregate(results, MarketRegime.RANGING, MTFAlignment.NONE, [], settings, "15m")
     assert d.direction == Direction.NEUTRAL
 
 
-def test_aggregate_mtf_against_blocks_conservative(uptrend_df, settings):
-    settings.quality_mode = settings.quality_mode.__class__.CONSERVATIVE
+def test_aggregate_mtf_against_blocks_5m(uptrend_df, settings):
+    # Joriy mantiq: qattiq MTF bloki FAQAT 5m da va ovozlar < 4 bo'lganda;
+    # 15m/1h/4h da esa ballga -1.3 jarima yetarli (kod izohiga qarang).
     results = [
         _res("ema_trend", Direction.BUY, 9),
         _res("supertrend", Direction.BUY, 9),
         _res("breakout", Direction.BUY, 9),
-        _res("trend_momentum", Direction.BUY, 9),
         _res("vwap", Direction.NEUTRAL, 0),
         _res("divergence", Direction.NEUTRAL, 0),
     ]
-    d = run_async(aggregate(results, MarketRegime.TRENDING, MTFAlignment.AGAINST,
-                  [("1h", Direction.SELL)], settings, "15m"))
+    d = aggregate(results, MarketRegime.TRENDING, MTFAlignment.AGAINST,
+                  [("1h", Direction.SELL)], settings, "5m")
     assert d.passes_threshold is False
     assert "bloklandi" in d.block_reason or "qarshi" in d.block_reason.lower()
 
@@ -127,8 +127,9 @@ def test_lifecycle_expiry(settings):
 
 
 def test_final_r_tp3():
+    # Joriy versiya: R chiqish narxidan hisoblanadi — (109-100)/(100-97) = +3R
     r = final_r_multiple(Direction.BUY, 100.0, 97.0, 3, 109.0)
-    assert math.isclose(r, 2.0, abs_tol=0.01)  # (1+2+3)/3 = 2R
+    assert math.isclose(r, 3.0, abs_tol=0.01)
 
 
 def test_final_r_sl_stage0():

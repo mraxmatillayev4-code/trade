@@ -73,18 +73,26 @@ class GoldRest:
                          limit: int = 500) -> pd.DataFrame:
         mx = to_mexc_symbol(symbol)
         interval = TF_TO_MEXC.get(timeframe.lower(), "Min5")
-        try:
-            r = await self._client.get(
-                f"{BASE}/api/v1/contract/kline/{mx}",
-                params={"interval": interval},
-            )
-            r.raise_for_status()
-            payload = r.json()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[GOLD] MEXC kline olinmadi %s %s: %s", symbol, timeframe, exc)
-            return pd.DataFrame()
 
-        data = payload.get("data") if isinstance(payload, dict) else None
+        # v113 XATO TUZATISH: shamlar INDEX narxida (birja perp premiyasi
+        # SL/TP ni 3-10$ buzardi — kanal spot deydi, perp esa spotdan farq).
+        # endpointlar: /kline/index_price/{mx} -> mavjud bo'lmasa /kline/{mx}.
+        data = {}
+        src_tag = "perp"
+        for endpoint, tag in (
+                (f"{BASE}/api/v1/contract/kline/index_price/{mx}", "index"),
+                (f"{BASE}/api/v1/contract/kline/{mx}", "perp")):
+            try:
+                r = await self._client.get(endpoint, params={"interval": interval})
+                r.raise_for_status()
+                payload = r.json()
+            except Exception:  # noqa: BLE001
+                continue
+            d = payload.get("data") if isinstance(payload, dict) else None
+            if d and d.get("time"):
+                data, src_tag = d, tag
+                break
+        data = data or {}
         if not data or not data.get("time"):
             logger.warning("[GOLD] MEXC kline bo'sh: %s %s", symbol, timeframe)
             return pd.DataFrame()
@@ -124,8 +132,16 @@ class GoldRest:
         df.attrs["symbol"] = symbol.upper()
         df.attrs["timeframe"] = timeframe
         if not df.empty:
-            logger.info("[GOLD] %s %s: %d ta yopiq sham (MEXC)", symbol, timeframe, len(df))
+            logger.info("[GOLD] %s %s: %d ta yopiq sham (MEXC/%s)", symbol, timeframe, len(df), src_tag)
         return df
+
+    async def get_all_tickers(self) -> list:
+        """v101: barcha juftliklarning jonli narxi (MEXC public, kalitsiz)."""
+        r = await self._client.get(f"{BASE}/api/v1/contract/ticker")
+        r.raise_for_status()
+        payload = r.json()
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        return data or []
 
     async def get_ticker_24h(self, symbol: str) -> dict:
         mx = to_mexc_symbol(symbol)
@@ -137,7 +153,8 @@ class GoldRest:
             d = r.json().get("data", {})
             return {
                 "symbol": symbol.upper(),
-                "price": float(d.get("lastPrice", 0.0)),
+                # v113: INDEX narx (spot benchmark) birinchi; yo'q bo'lsa lastPrice
+                "price": float(d.get("indexPrice") or d.get("lastPrice") or 0.0),
                 "price_change_pct": float(d.get("riseFallRate", 0.0)) * 100.0,
                 "high_24h": float(d.get("high24Price", 0.0)),
                 "low_24h": float(d.get("lower24Price", 0.0)),

@@ -2,7 +2,7 @@
 import asyncio
 import math
 
-from app.backtest.engine import run_backtest_sync as run_backtest
+from app.backtest.engine import run_backtest
 from app.backtest.metrics import compute_metrics, max_drawdown_r
 from app.backtest.walk_forward import run_walk_forward
 

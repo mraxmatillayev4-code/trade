@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.symbols import full_label
 from app.database.models.signal import Signal, SignalConfirmation
+from app.core.logging import get_logger
 from app.database.models.paper import PaperAccount
+from app.services.paper_split import signal_bucket
+
+logger = get_logger(__name__)
+
 
 # O'zbekiston mahalliy vaqti (UTC+5)
 LOCAL_TZ = timezone(timedelta(hours=5))
@@ -65,6 +70,27 @@ def _period_bounds(period: str, target_date: date | None = None) -> tuple[dateti
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), label
 
 
+def completed_period_targets(now: datetime) -> dict:
+    """v114: avto-hisobot uchun TUGAGAN davr sanalari (bo'sh-hisobot tuzatishi).
+
+    Hisobot mahalliy yarim tundan so'ng yuborilganda "bugun/hafta/oy" hali
+    bo'sh bo'lardi — endi avto-hisobot har doim TUGAGAN davrni yig'adi:
+      * daily   -> kecha (to'liq tugagan kun)
+      * weekly  -> oxirgi tugagan yakshanba (hafta Dushanba..Yakshanba)
+      * monthly -> o'tgan oyning oxirgi kuni
+    `now` tzsiz bo'lsa UTC deb hisoblanadi.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    today = now.astimezone(LOCAL_TZ).date()
+    back = (today.weekday() + 1) % 7 or 7
+    last_sunday = today - timedelta(days=back)
+    prev_month_last = today.replace(day=1) - timedelta(days=1)
+    return {"daily": today - timedelta(days=1),
+            "weekly": last_sunday,
+            "monthly": prev_month_last}
+
+
 def parse_date_input(text: str) -> date | None:
     """Foydalanuvchi kiritgan sanani tushunish: YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY."""
     text = (text or "").strip()
@@ -90,6 +116,28 @@ def _as_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _pips_of(s) -> float:
+    """v109: yopilgan signal JAMI netto foyda/zarari (pip, 2-lot) — close_price dan.
+    v128: X5 uchun signal_pips_pair orqali — netto (=v120 regli) qaytadi."""
+    try:
+        from app.notifications.telegram import signal_pips as _sp
+        pr, _w = _sp(s)
+        return float(pr or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _pips_move_of(s) -> float:
+    """v128 (X5): TP-harakat (1-lot o'lchovi, kanal konvensiyasi) — kirishdan
+    chiqishgacha narx yurgan masofa. «TP ga bordi +80 pip» deganzoda SHU sanaladi."""
+    try:
+        from app.notifications.telegram import signal_pips_pair as _spp
+        mv, _nt, _w = _spp(s)
+        return float(mv or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 async def _read_block(session: AsyncSession, start_utc: datetime, end_utc: datetime,
@@ -189,16 +237,74 @@ async def _channel_lines(session: AsyncSession, created: list[Signal]) -> list[s
     return await _read_block(session, start, now.astimezone(timezone.utc), created)
 
 
+def _source_split(created: list, closed: list) -> dict:
+    """v92: signal manbasi bo'yicha (KANAL / OZI) qisqa xulosa."""
+    try:
+        from app.services.paper_split import signal_bucket
+    except Exception:  # noqa: BLE001
+        return {"line": ""}
+    k = [s for s in created if signal_bucket(s) == "KANAL"]
+    o = [s for s in created if signal_bucket(s) == "OZI"]
+    kc = [s for s in closed if signal_bucket(s) == "KANAL"]
+    oc = [s for s in closed if signal_bucket(s) == "OZI"]
+    kw = sum(1 for s in kc if (s.r_multiple or 0) > 0.05)
+    ow = sum(1 for s in oc if (s.r_multiple or 0) > 0.05)
+    kr = sum(s.r_multiple or 0 for s in kc)
+    orr = sum(s.r_multiple or 0 for s in oc)
+    def _wr(w, n):
+        return f" WR {w / n * 100:.0f}%" if n else ""
+    return {"line": (f"   📡 Kanal: <b>{len(k)}</b> ({len(kc)} yopilgan{_wr(kw, len(kc))}"
+                     f" | {kr:+.1f}R)  |  🤖 Bot o‘zi: <b>{len(o)}</b> "
+                     f"({len(oc)} yopilgan{_wr(ow, len(oc))} | {orr:+.1f}R)"),
+            "kanal": len(k), "ozi": len(o)}
+
+
+async def _paper_3(session, user_id, acc, *, full: bool = False,
+                   since=None, until=None) -> list[str]:
+    """v109 (TALAB): YAGONA HISOB — KANAL / O'ZI bo'linishi olib tashlandi.
+
+    Davr davomidagi real $ natija (yopilgan lotlarning realized_pnl yig'indisi)
+    + joriy balans. since/until — UTC davr chegaralari (None = hammasi).
+    """
+    pnl = None
+    try:
+        from sqlalchemy import func as _fn
+        from app.database.models.paper import PaperPosition
+        stmt = select(_fn.sum(PaperPosition.realized_pnl)).where(
+            PaperPosition.status == "CLOSED")
+        if user_id is not None:
+            stmt = stmt.where(PaperPosition.user_id == user_id)
+        if since is not None:
+            stmt = stmt.where(PaperPosition.closed_at >= since)
+        if until is not None:
+            stmt = stmt.where(PaperPosition.closed_at <= until)
+        pnl = await session.scalar(stmt)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[REPORT] paper pnl: %s", exc)
+    bal_txt = ""
+    try:
+        _acc = acc
+        if _acc is None and user_id is not None:
+            _acc = await session.scalar(
+                select(PaperAccount).where(PaperAccount.user_id == user_id))
+        if _acc is not None:
+            bal_txt = f"  \u00B7  hisob <b>${float(_acc.balance or 0):,.2f}</b>"
+    except Exception:  # noqa: BLE001
+        pass
+    if pnl is None:
+        return ["\U0001F4B0 Natija: —" + bal_txt]
+    return [f"\U0001F4B0 Jami natija: <b>{float(pnl or 0.0):+,.2f}$</b>{bal_txt}"]
+
+
 async def build_report(
     session: AsyncSession,
     period: str,
     user_id: int | None = None,
     target_date: date | None = None,
 ) -> str:
-    if target_date is not None:
-        title, icon = "SANA BO'YICHA HISOBOT", "🔎"
-    else:
-        title, icon = PERIODS[period]
+    # v114: sarlavha har doim davrga mos. Avto-hisobot endi TUGAGAN davr uchun
+    # ham shu nom bilan keladi (qaysi kun/hafta/oyligi "Davr" qatorida yoziladi).
+    title, icon = PERIODS.get(period, PERIODS["daily"])
 
     start_utc, end_utc, label = _period_bounds(period, target_date)
 
@@ -211,63 +317,70 @@ async def build_report(
     signals = list((await session.execute(stmt)).scalars().all())
     created, closed = _select_signals(signals, start_utc, end_utc)
 
+
+    # ============ v109 (TALAB): IXCHAM HISOBOT — barcha davr bir xil bo'lagida.
+    # Faqat: signal soni, win rate, +pip/-pip jami, $ natija. To'liq tafsilot
+    # — «📄 To'liq tafsilot» tugmasi orqali (build_full_report).
     wins = [s for s in closed if (s.r_multiple or 0) > 0.05]
     losses = [s for s in closed if (s.r_multiple or 0) < -0.05]
-    be = len(closed) - len(wins) - len(losses)
-    total_r = sum(s.r_multiple or 0 for s in closed)
-    avg_r = (total_r / len(closed)) if closed else 0.0
     wr = (len(wins) / len(closed) * 100) if closed else 0.0
-
     buys = sum(1 for s in created if s.direction == "BUY")
     sells = len(created) - buys
 
-    by_symbol: dict[str, int] = {}
-    by_tf: dict[str, int] = {}
-    for s in created:
-        by_symbol[s.symbol] = by_symbol.get(s.symbol, 0) + 1
-        by_tf[s.timeframe] = by_tf.get(s.timeframe, 0) + 1
-    top_symbol_raw = max(by_symbol, key=by_symbol.get) if by_symbol else "—"
-    top_symbol = full_label(top_symbol_raw) if top_symbol_raw != "—" else "—"
-    top_tf = str(max(by_tf, key=by_tf.get)).upper() if by_tf else "—"
-
-    acc = None
-    if user_id is not None:
-        acc = await session.scalar(
-            select(PaperAccount).where(PaperAccount.user_id == user_id)
+    # v128 (X4): WIN RATE LOT KESIMIDA — signal-level WR yolg'on bo'lardi:
+    # zombie (sweep_orphans bilan exportga kiritilgan) va ko'p-lotli signallar
+    # signal-levelda bittachasi sanalib, 100% CIR ko'rsatardi. Endi birlamchi
+    # ko'rsatkich — PAPER LOT natijalari (har lot uchun alohida g'alaba/zarar).
+    # Lot yo'q bo'lsa — eski signal-level ga qaytamiz.
+    _lot_win = _lot_lose = _lot_n = 0
+    _wr_line128: str | None = None
+    try:
+        from sqlalchemy import select as _sel128, func as _fn128  # noqa: F401
+        from app.database.models.paper import PaperPosition as _PP128
+        _stmt128 = (
+            _sel128(_PP128)
+            .where(_PP128.closed_at >= start_utc, _PP128.closed_at <= end_utc,
+                   _PP128.realized_pnl.isnot(None))
+            .limit(4000)
         )
+        if user_id is not None:
+            _stmt128 = _stmt128.where(_PP128.user_id == user_id)
+        _lots128 = list((await session.execute(_stmt128)).scalars().all())
+        if _lots128:
+            _lot_win = sum(1 for p in _lots128 if float(p.r_multiple or 0) > 0.05)
+            _lot_lose = sum(1 for p in _lots128 if float(p.r_multiple or 0) < -0.05)
+            _lot_n = len(_lots128)
+            _wr128 = (_lot_win / _lot_n * 100) if _lot_n else 0.0
+            _wr_line128 = (f"🎯 Win rate (lot kesimida): <b>{_lot_win}/{_lot_n}</b> — "
+                           f"{_wr128:.0f}%  (zarar: {_lot_lose})")
+    except Exception:  # noqa: BLE001
+        _wr_line128 = None
+
+    _pp = [_pips_of(s) for s in closed]
+    _win_pips = sum(x for x in _pp if x > 0)
+    _loss_pips = sum(-x for x in _pp if x < 0)
+    _net_pips = sum(_pp)
+    # v128 (X5): TP-harakat (1-lot, kanal konvensiyasi) alohida — kanal postlari
+    # bilan textin solishtirish mumkin bo'lsin.
+    _mv128 = [_pips_move_of(s) for s in closed]
+    _mv_win = sum(x for x in _mv128 if x > 0)
+    _mv_loss = sum(-x for x in _mv128 if x < 0)
+    _mv_net = sum(_mv128)
 
     lines = [
         f"{icon} <b>{title}</b>",
         f"📆 Davr: <b>{label}</b>",
-    ]
-    lines += await _read_block(session, start_utc, end_utc, created)
-    lines += [
         "━━━━━━━━━━━━━━━━",
-        f"📨 Chiqarilgan signallar: <b>{len(created)}</b>",
-        f"   🟢 BUY: {buys}  |  🔴 SELL: {sells}",
-        f"✅ Yopilgan (baholangan): {len(closed)}",
-        f"   🏆 Yutuq: {len(wins)}  |  💥 Zarar: {len(losses)}  |  🔵 Zararsiz: {be}",
-        "━━━━━━━━━━━━━━━━",
-        f"🎯 Win rate: <b>{wr:.1f}%</b>",
-        f"📊 O'rtacha R: <b>{avg_r:+.2f}R</b>",
-        f"📦 Jami natija: <b>{total_r:+.2f}R</b>",
-        f"🏅 Eng faol: <b>{top_symbol}</b>  •  ⏱ {str(top_tf).upper()}",
+        f"📨 Signallar: <b>{len(created)}</b>  (🟢 {buys} · 🔴 {sells})",
+        _wr_line128 or f"🎯 Win rate: <b>{len(wins)}/{len(closed)}</b> — {wr:.0f}%",
+        f"📊 TP-harakat (1-lot): <b>+{_mv_win:,.0f}</b> / −{_mv_loss:,.0f}  "
+        f"(jami <b>{_mv_net:+,.0f}</b>)",
+        f"💵 Pipslar — JAMI netto (2-lot): <b>+{_win_pips:,.0f}</b> / "
+        f"−{_loss_pips:,.0f}  (jami <b>{_net_pips:+,.0f}</b>)",
     ]
+    lines += await _paper_3(session, user_id, None, since=start_utc, until=end_utc)
     if not created:
-        lines += [
-            "━━━━━━━━━━━━━━━━",
-            "ℹ️ Bu davrda foydalanuvchilarga signal yuborilmagan.",
-        ]
-    if acc:
-        pnl = acc.balance - acc.initial_balance
-        lines += [
-            "━━━━━━━━━━━━━━━━",
-            f"💵 Paper balans: <b>${acc.balance:,.2f}</b> ({pnl:+,.2f}$)",
-        ]
-    lines += [
-        "━━━━━━━━━━━━━━━━",
-        "<i>Bu tahliliy statistika — moliyaviy tavsiya emas.</i>",
-    ]
+        lines += ["ℹ️ Bu davrda signal yuborilmagan."]
     return "\n".join(lines)
 
 
@@ -298,6 +411,22 @@ def _mini_line(name: str, created: list, closed: list) -> str:
     n_all = len(created)
     n_cl = len(closed)
     if n_cl == 0:
+        # v123: bekor qilingan signallarni "hali yopilmagan"dan ajratamiz —
+        # aks holda CANCELLED (kirish ochilmagan) ham "ochiq"dek ko'rinardi.
+        def _bekor123(s) -> bool:
+            es = str(getattr(s, "entry_status", "") or "").upper()
+            st = str(getattr(s, "status", "") or "").upper()
+            cr = str(getattr(s, "close_reason", "") or "").strip()
+            return (es == "CANCELLED") or (st == "CANCELLED") or bool(cr)
+
+        n_bekor = sum(1 for s in created if _bekor123(s) and not s.is_active)
+        if n_bekor:
+            n_ochiq = n_all - n_bekor
+            if n_ochiq == 0:
+                return (f"  • {name}: {n_all} ta signal "
+                        f"(barchasi bekor — kirish ochilmagan)")
+            return (f"  • {name}: {n_all} ta signal "
+                    f"({n_bekor} ta bekor, {n_ochiq} ta hali ochiq)")
         return f"  • {name}: {n_all} ta signal (hali yopilmagan)"
     wins = sum(1 for s in closed if (s.r_multiple or 0) > 0.05)
     losses = sum(1 for s in closed if (s.r_multiple or 0) < -0.05)
@@ -446,28 +575,54 @@ async def build_full_report(session, period: str, user_id=None, target_date=None
 
     L += await _channel_lines(session, created)
 
-    # ---- So'nggi bitimlar ----
+    # ---- 🧾 HAR SIGNAL P/L (v109 TALAB): pips va $ birga ----
     L.append("━" * 20)
-    L.append("<b>🕒 SO'NGGI 8 BAHOLANGAN SIGNAL</b>")
-    for s in closed[:8]:
-        r = s.r_multiple or 0
+    L.append("<b>🧾 HAR SIGNAL P/L</b>")
+    _money: dict[int, float] = {}
+    if closed:
+        try:
+            from sqlalchemy import func as _fn
+            from app.database.models.paper import PaperPosition as _PP
+            _rows = (await session.execute(
+                select(_PP.signal_id, _fn.sum(_PP.realized_pnl))
+                .where(_PP.signal_id.in_([s.id for s in closed]))
+                .group_by(_PP.signal_id))).all()
+            _money = {int(r[0]): float(r[1] or 0.0) for r in _rows}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[REPORT] har signal $: %s", exc)
+    for s in closed[:25]:
+        r = float(s.r_multiple or 0)
         emo = "🏆" if r > 0.05 else ("🔵" if abs(r) <= 0.05 else "💥")
-        L.append(f"  {emo} {full_label(s.symbol)} {s.timeframe.upper()} {s.direction} "
-                 f"→ {r:+.1f}R")
+        no_txt = f" №{s.signal_no}" if getattr(s, "signal_no", None) else ""
+        m = _money.get(int(s.id))
+        m_txt = f" · {m:+,.2f}$" if m is not None else ""
+        L.append(f"  {emo}{no_txt} {full_label(s.symbol)} {s.direction} "
+                 f"{_pips_of(s):+,.0f}p{m_txt} ({r:+.1f}R)")
+    if not closed:
+        L.append("  ℹ️ Bu davrda yopilgan signal yo'q.")
 
     # ---- Paper (foydalanuvchi shaxsiy hisobi) ----
     if user_id is not None:
         acc = await session.scalar(select(PaperAccount).where(PaperAccount.user_id == user_id))
         L.append("━" * 20)
-        L.append("<b>💵 QOG'OZ HISOB (sizning)</b>")
+        L += await _paper_3(session, user_id, acc, since=start_utc, until=end_utc)
+        L.append("<b>💵 QOG'OZ HISOB (sizning — umumiy sozlamalar)</b>")
         if acc:
             pnl = acc.balance - acc.initial_balance
             pnl_pct = (pnl / acc.initial_balance * 100) if acc.initial_balance else 0
-            losses_acc = acc.total_trades - acc.total_wins
-            awr = (acc.total_wins / acc.total_trades * 100) if acc.total_trades else 0
+            tr, wn, ls = int(acc.total_trades or 0), int(acc.total_wins or 0), 0
+            try:
+                from app.paper_trading.engine import PaperEngine
+                st = await PaperEngine().trade_stats(session, user_id)
+                tr, wn, ls = int(st["trades"]), int(st["wins"]), int(st["losses"])
+            except Exception as exc:  # noqa: BLE001
+                ls = max(0, tr - wn)
+                logger.debug("[REPORT] trade_stats: %s", exc)
+            losses_acc = ls if ls else max(0, tr - wn)
+            awr = (wn / tr * 100) if tr else 0
             L.append(f"💵 Balans: <b>${acc.balance:,.2f}</b> / boshlang'ich ${acc.initial_balance:,.2f}")
             L.append(f"📈 Foyda: <b>{pnl:+,.2f}$ ({pnl_pct:+.1f}%)</b>")
-            L.append(f"📊 Bitimlar: {acc.total_trades} (🏆{acc.total_wins} / 💥{losses_acc}) WR {awr:.0f}%")
+            L.append(f"📊 Bitimlar: {tr} (🏆{wn} / 💥{losses_acc}) WR {awr:.0f}%")
             L.append(f"🤖 Avto-trade: {'YOQILGAN ✅' if acc.auto_trade_enabled else 'o\'chiq ❌'}")
             if acc.paused_by_circuit:
                 L.append("⛔️ Himoya: 3 ketma-ket zarar — avto-trade PAUZA qilingan!")

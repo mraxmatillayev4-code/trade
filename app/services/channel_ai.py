@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -14,6 +15,12 @@ from app.core.logging import get_logger
 from app.core.symbols import resolve_symbol
 from app.services.channel_ocr import ocr_image
 from app.services.channel_parse import ParsedSignal, parse_signal
+from app.services.channel_real import strict_verdict as _strict_verdict
+from app.services.local_ai import analyze_ex as _lai_ex
+try:
+    from app.services.local_ai import __version__ as _lai_ver
+except Exception:  # noqa: BLE001
+    _lai_ver = '?'
 
 logger = get_logger(__name__)
 
@@ -132,15 +139,94 @@ def _loose_parse(blob: str, has_image: bool, caption: str = "") -> ParsedSignal 
     )
 
 
-def interpret(text: str | None, image_bytes: bytes | None = None) -> ParsedSignal | None:
+def _live_ref(symbol: str = "XAUUSDT") -> float | None:
+    """Jonli narx (imkon bo'lsa) — qisqa darajalarni to'liq narxga aylantirish uchun."""
+    try:
+        from app.services.channel_inbox import _last_px
+        px = float(_last_px(symbol) or 0.0)
+        return px if px > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _from_real(v: dict, blob: str) -> ParsedSignal:
+    """v91: qat'iy detektor qarorini ParsedSignal ga o'giradi."""
+    tps = [float(x) for x in (v.get("tps") or [])]
+    zone = v.get("zone") or (None, None)
+    src = str(v.get("src") or "")
+    return ParsedSignal(
+        direction=str(v.get("direction") or "BUY"),
+        symbol=str(v.get("symbol") or "XAUUSDT"),
+        timeframe="1m",
+        entry=(float(v["entry"]) if v.get("entry") is not None else None),
+        sl=(float(v["sl"]) if v.get("sl") is not None else None),
+        tp=(tps[0] if tps else None),
+        tps=tps,
+        raw=(blob or "")[:800],
+        zone_low=(float(zone[0]) if zone and zone[0] is not None else None),
+        zone_high=(float(zone[1]) if zone and zone[1] is not None else None),
+        # NOW-REF — narx jonli olingan; NOW — bozor narxi ishga tushishda olinadi
+        entry_src=("" if src.startswith("NOW") else "TEXT"),
+    )
+
+
+def _strict_gate(caption: str, blob: str, has_image: bool, ctx: str = ""):
+    """v91: FAQAT HAQIQIY SIGNAL qatlami (v93: `ctx` = oldingi xabarlar oynasi).
+
+    Qaytaradi: (parsed|None, reason, final) — `final=True` bo'lsa eski oqimga
+    o'tilmaydi (qat'iy rad yoki kutish).
+    """
+    text = "\n".join(p for p in (caption, blob) if p).strip()
+    if not text:
+        return None, "", False
+    try:
+        rv = _strict_verdict(text, ref=_live_ref(), has_image=bool(has_image),
+                             ctx=(ctx or ""))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH-AI] qatiy qatlam xatosi: %s: %s", type(exc).__name__, exc)
+        return None, "", False
+    verdict = str(rv.get("verdict") or "EMAS")
+    if verdict == "SIGNAL":
+        return _from_real(rv, text), "haqiqiy-signal", True
+    if verdict == "KUTISH":
+        return None, "kutish: " + str(rv.get("reason") or ""), True
+    reason = str(rv.get("reason") or "")
+    if reason in ("yonalish yoq", "bosh"):
+        return None, reason, False          # eski oqim ko'rib chiqadi
+    return None, reason, True
+
+
+def interpret(text: str | None, image_bytes: bytes | None = None,
+              ctx: str = "") -> ParsedSignal | None:
+    """Sinxron yo'l (async bo'lmagan chaqiruvlar uchun)."""
     cap = (text or "").strip()
     ocr = _ocr(image_bytes)
     blob = "\n".join(p for p in (cap, ocr) if p)
-    got, _reason = _classify(cap, blob, bool(image_bytes), bool(ocr))
+    got, _reason = _classify(cap, blob, bool(image_bytes), bool(ocr), ctx or "")
     return got
 
 
-def _classify(caption: str, blob: str, has_image: bool, has_ocr: bool):
+def _classify(caption: str, blob: str, has_image: bool, has_ocr: bool, ctx: str = ""):
+    global last_strict_ok
+    last_strict_ok = False
+    # v91: AVVAL qat'iy «faqat haqiqiy signal» qatlami — sababi bilan rad etadi
+    # v93: kontekst (qo'shni xabarlar) ham beriladi — bo'lib yozilgan signal yig'iladi
+    _p, _why, _final = _strict_gate(caption, blob, has_image, ctx)
+    if _p is not None:
+        last_strict_ok = True
+        return _p, _why
+    if _final:
+        return None, _why
+    # v46: mahalliy AI xatosi hech qachon oqimni to'xtatmasin
+    try:
+        _lp, _lwhy, _lveto = _lai_ex(blob or caption or '', '', bool(has_image))
+    except Exception as _le:  # noqa: BLE001
+        logger.warning('[CH-AI] lokal AI xato: %s: %s', type(_le).__name__, _le)
+        _lp, _lwhy, _lveto = None, '', False
+    if _lp is not None:
+        return _lp, 'lokal-ai'
+    if _lveto:
+        return None, _lwhy
     if _is_noise(blob or caption):
         return None, "shovqin (salom/reklama/TP HIT)"
     if caption:
@@ -171,35 +257,49 @@ def _classify(caption: str, blob: str, has_image: bool, has_ocr: bool):
 
 
 async def interpret_async(text: str | None,
-                          image_bytes: bytes | None = None) -> ParsedSignal | None:
+                          image_bytes: bytes | None = None,
+                          ctx: str = "",
+                          has_image: bool | None = None,
+                          **kwargs) -> ParsedSignal | None:
     """Har xabarni ko'radi: avval mahalliy AI, yetmasa LLM. reason oxirgi chaqiriqda."""
     global last_reason
     cap = (text or "").strip()
-    ocr = _ocr(image_bytes)
+    img_present = bool(image_bytes) or bool(has_image)
+    # v89: OCR og'ir — event loop bloklanmasin (to_thread)
+    try:
+        ocr = await asyncio.to_thread(_ocr, image_bytes) if image_bytes else ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH-AI] OCR (thread): %s", exc)
+        ocr = ""
     blob = "\n".join(p for p in (cap, ocr) if p)
     snippet = (blob or cap or "").replace("\n", " ")[:100]
     logger.info(
         "[CH-AI] ko'rindi rasm=%s ocr=%s belgi=%d: %s",
-        bool(image_bytes), bool(ocr), len(blob or ""), snippet or "(bo'sh)",
+        img_present, bool(ocr), len(blob or ""), snippet or "(bo'sh)",
     )
-    got, reason = _classify(cap, blob, bool(image_bytes), bool(ocr))
+    got, reason = _classify(cap, blob, img_present, bool(ocr), ctx or "")
     if got:
         last_reason = "SIGNAL"
         logger.info("[CH-AI] SIGNAL %s %s", got.direction, got.symbol)
         return got
-    maybe = bool(image_bytes) or bool(_find_symbol(blob or cap) or _find_direction(blob or cap))
+    maybe = img_present or bool(_find_symbol(blob or cap) or _find_direction(blob or cap))
     if maybe:
-        llm = await _llm_parse(blob or cap or "(chart image, short caption)", bool(image_bytes))
+        _llm_txt = (blob or cap or "(chart image, short caption)")
+        if ctx:
+            _llm_txt = "OLDINGI XABARLAR (kontekst):\n" + str(ctx)[-600:] + "\n\n" + _llm_txt
+        llm = await _llm_parse(_llm_txt, img_present)
         if llm:
             last_reason = "SIGNAL"
             logger.info("[CH-AI] SIGNAL(LLM) %s %s", llm.direction, llm.symbol)
             return llm
     last_reason = reason
-    logger.info("[CH-AI] EMAS (%s)", reason)
+    logger.warning("[CH-AI] EMAS (%s) | %s", reason, snippet or "(bosh)")
     return None
 
 
 last_reason: str = ""
+# v93: qat'iy qatlam (channel_real) SIGNAL dedi -> keyingi darvozalar uni o'ldirmasin
+last_strict_ok: bool = False
 
 
 async def _llm_parse(blob: str, has_image: bool) -> ParsedSignal | None:

@@ -5,6 +5,7 @@ Ikki aniq qarama-qarshi yo'nalish (reklama) tashlanadi.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from app.core.symbols import fit_symbol, resolve_symbol
@@ -147,6 +148,8 @@ class ParsedSignal:
     tf_explicit: bool = False
     zone_low: float | None = None
     zone_high: float | None = None
+    # v84: kirish qayerdan olindi — TEXT | CTX | PIPS ("" = aytilmagan)
+    entry_src: str = ""
 
 
 def _to_float(s: str | None) -> float | None:
@@ -276,7 +279,8 @@ _CLOSE_NOW = re.compile(
     r"\bsignal\s*off\b|\boff\s*qil|\bto'?xtat(?:dik|amiz)?\b|"
     r"\bclose\s*(?:now|all|trade|it)\b|\bsignalni\s*yop|"
     r"\bishlamaymiz\b|\bclosed\s*(?:in\s*)?(?:profit|loss)\b|"
-    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b|بسته|اغلق)",
+    r"\btp\s*olindi\b|\bsl\s*ur(?:di|ildi)\b|بسته|اغلق|\baktivmas\b|"
+    r"\baktiv\s*emas\b|\bfaol\s*emas\b)",
     re.I,
 )
 _YOPAMIZ = re.compile(r"\byopamiz\b|\byopish\b", re.I)
@@ -288,7 +292,7 @@ _CLOSE_COND = re.compile(
 
 def is_close_message(text: str | None) -> bool:
     """Kanal admini bitimni hozir yopdi / tugatdi. 'buzsa yopamiz' — shart, yopish emas."""
-    raw = str(text or "")
+    raw = _norm_uc(str(text or ""))
     if not raw.strip():
         return False
     if _CLOSE_NOW.search(raw):
@@ -296,6 +300,32 @@ def is_close_message(text: str | None) -> bool:
     if _YOPAMIZ.search(raw) and not _CLOSE_COND.search(raw):
         return True
     return False
+
+
+_LOSS_NOW = re.compile(
+    r"(\bsl\s*(?:hit|ur(?:di|ildi|dimi)?|bo'?ldi|da\s*yop|ni\s*ur)|"
+    r"\bstop\s*loss\b|\bstoploss\b|"
+    r"-\s*\d{1,4}\s*(?:pip|pips|punkt|point)|\bzarar\b|\bloss\b)",
+    re.I,
+)
+_LOSS_PLAN = re.compile(
+    r"\b(?:sl|stop\s*loss|stoploss)\b\s*[:=]?\s*\d{3,5}(?:[.,]\d{1,3})?", re.I
+)
+
+
+def is_loss_message(text: str | None) -> bool:
+    """Kanal 'stop loss / zarar' deb yozgan natija posti (v65).
+
+    Bunday postda paper bitim MAHALLIY narxda emas, o'z STOP narxida yopiladi —
+    minus stop lossgacha qancha bo'lsa, o'shancha hisoblanadi.
+    Yangi signal rejasi («SL: 4367.44») bunga KIRMAYDI.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if _LOSS_PLAN.search(raw):
+        return False
+    return bool(_LOSS_NOW.search(raw))
 
 
 def _zone_entry(raw: str) -> float | None:
@@ -495,6 +525,54 @@ def _compact_levels(raw: str) -> tuple:
     return direction, entry, sl, zlo, zhi
 
 
+# v106: GOLD KING kabi kanallar formati:
+#   "#XAUUSD BUYY.NOW.4422" / "SELLL.NOW.4418" (kirish qatorida),
+#   "TP\u00b9 ..... 4426" (ustki indeks + nuqtalar), "SLL..... 4412"
+_DOT_SL = re.compile(r"\bSL+L?\s*\.+\s*(\d{2,6}(?:[.,]\d{1,5})?)", re.I)
+_DOT_TP = re.compile(r"\bTP\s*(?:[\u00b9\u00b2\u00b3\u00b4\u00b51-9])?\s*\.+\s*(\d{2,6}(?:[.,]\d{1,5})?)", re.I)
+_NOW_ENTRY = re.compile(
+    r"\b(BUY+|SELL+|LONG|SHORT)\w*\s*(?:\.?\s*(?:NOW|NW|LIMIT|MARKET|STOP))?"
+    r"\s*\.?\s*@?\s*(\d{2,6}(?:[.,]\d{1,5})?)", re.I)
+
+
+# v107: label-li darajalar (anabel / gold_signals uslubi)
+_LBL_ENTRY = re.compile(
+    r"(?:trading on|key level|psychological level|current price|pivot level)"
+    r"[^0-9\n]{0,14}(\d{1,6}(?:[.,]\d{1,5})?)", re.I)
+_LBL_SL = re.compile(
+    r"(?:safe |recommended |my )?stop loss\s*[-\u2013:]?\s*(\d{1,6}(?:[.,]\d{1,5})?)", re.I)
+_LBL_TP = re.compile(
+    r"(?:goal|target|take profit)\s*[-\u2013:]?\s*(\d{1,6}(?:[.,]\d{1,5})?)", re.I)
+
+
+# v107: TP pip bilan yozilgan kanallar (lanafx68): "TP1: 50 pip", "TP2: 100 pip"
+_PIP_TP = re.compile(r"\bTP\s*[1-5]?\s*[:\-\u2013]?\s*(\d{2,4}(?:[.,]\d)?)\s*pips?\b", re.I)
+
+
+def _collect_pip_tps(raw: str) -> list[float]:
+    out: list[float] = []
+    for m in _PIP_TP.finditer(raw or ""):
+        try:
+            v = float(m.group(1).replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _collect_dot_tps(raw: str) -> list[float]:
+    out: list[float] = []
+    for m in _DOT_TP.finditer(raw or ""):
+        try:
+            v = float(m.group(1).replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 def _collect_tps(raw: str) -> list[float]:
     raw = _strip_r_tp(raw or "")
     found: dict[int, float] = {}
@@ -522,13 +600,72 @@ def _collect_tps(raw: str) -> list[float]:
     return seen[:5]
 
 
-def parse_signal(text: str | None) -> ParsedSignal | None:
-    """Matn/OCR dan signal. Reklama (ikkala yo'nalish, juftlik yo'q) → None."""
+def _norm_uc(s: str) -> str:
+    """v112: fxgoldmaster92 kabi kanallar QALIN UNICODE bilan yozadi
+    ("#GOLD #BUY NOW 4188, TP1...") — NFKC oddiy ASCII/matnga tushiradi."""
+    return unicodedata.normalize("NFKC", s)
+
+
+def bare_now(text: str | None) -> ParsedSignal | None:
+    """v115: darajasiz "buy now"/"sell now" signali (BEK FXX uslubi).
+
+    Zona/SL/TP matnda yo'q — faqat yo'nalish. Raqamli darajalar bo'lsa
+    (zona, SL/TP, pips-natija) bu funksiya emas, asosiy parser ishlaydi.
+    entry_src="BARE" qaytaradi — _save SL=10 pip, TP=1:3/1:4/1:5 qo'yadi.
+    """
     if not text or not str(text).strip():
         return None
-    raw = str(text).strip()
+    raw = _norm_uc(str(text).strip())
+    m = re.search(r"\b(buy|sell)\s+now+w?\b", raw, re.I)
+    if not m:
+        return None
+    if re.search(r"\d{3,}", raw):            # daraja/narx bor — bare emas
+        return None
+    if re.search(r"\bpips?\b|\btps?\b|\bsl\b", raw, re.I):
+        return None                          # natija yoki darajali gap
+    if "?" in raw or "!" in raw.split("now")[0]:
+        return None                          # savol/undov — signal emas
+    sym = ""
+    if re.search(r"\b(xauusd|xauu|xau|gold|oltin)\b", raw, re.I):
+        sym = "XAUUSD"
+    if not sym and len(raw) > 30:
+        return None                          # uzun suhbat — ehtiyotkorlik
+    return ParsedSignal(
+        direction=_dir_word(m.group(1)),
+        symbol=sym or "XAUUSD",
+        timeframe="1m",
+        entry=None, sl=None, tp=None, tps=[],
+        raw=raw[:800],
+        tf_explicit=False, zone_low=None, zone_high=None,
+        entry_src="BARE",
+    )
+
+
+def parse_signal(text: str | None) -> ParsedSignal | None:
+    """Matn/OCR dan signal. Reklama (ikkala yo'nalish, juftlik yo'q) → None.
+
+    v115: darajali format topilmasa (entry/SL/TP/zona yo'q) —
+    "buy now"/"sell now" (BARE) ga tushadi.
+    """
+    p = _parse_levels_full(text)
+    if p is not None and (p.entry or p.sl or p.tp or p.tps
+                          or p.zone_low or p.zone_high):
+        return p
+    b = bare_now(text)
+    if b is not None:
+        return b
+    return p
+
+
+def _parse_levels_full(text: str | None) -> ParsedSignal | None:
+    """Matn/OCR dan darajali signal (avvalgi parse_signal tanasi)."""
+    if not text or not str(text).strip():
+        return None
+    raw = _norm_uc(str(text).strip())
     if len(raw) > 4000:
         raw = raw[:4000]
+    # v107: minglik vergul ("4,101.362" -> "4101.362") — kasr verguli EMAS
+    raw = re.sub(r"(\d),(\d{3})\.", r"\1\2.", raw)
 
     buys = len(BUY_WORDS.findall(raw))
     sells = len(SELL_WORDS.findall(raw))
@@ -570,6 +707,13 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
         direction = "BUY" if buys else ("SELL" if sells else "")
     gold_lvl = _gold_level(raw)
     idea = bool(_IDEA_RE.search(raw))
+    # v106: NATIJA/YAKUN posti ("200+PIPS PROFIT", "TP 5 HIT", "Done") —
+    # yangi daraja bo'lmasa SIGNAL EMAS (bot xato savdo ochmasin)
+    if re.search(r"\d+\s*\+?\s*PIPS|\bHIT\b|\bDONE\b", raw, re.I):
+        if not (_DOT_SL.search(raw) or _DOT_TP.search(raw)
+                or SL_PAT.search(raw) or _collect_tps(raw)
+                or compact_entry or compact_sl):
+            return None
     if not direction:
         if idea and (symbol or gold_lvl):
             symbol = symbol or "XAUUSDT"
@@ -641,9 +785,21 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
         sl = _num(SL_PAT.search(raw))
     if not sl:
         sl = _num(INV_SL.search(raw))
+    if not sl:
+        sl = _num(_DOT_SL.search(raw))       # v106: "SLL..... 4412"
     tps = _collect_tps(raw)
+    if not tps:
+        tps = _collect_dot_tps(raw)          # v106: "TP1 ..... 4426"
     tp = tps[0] if tps else None
-    if gold_lvl:
+    # v107: label-li formatlar (anabelsignals, gold_signals):
+    #   "trading on 4405.2 pivot level", "key level - 1.1192",
+    #   "Goal - 4387.3 / Target - 1.0956", "Safe/Recommended/My Stop Loss - 4416.4"
+    if entry is None:
+        entry = _num(_LBL_ENTRY.search(raw))
+    if not sl:
+        sl = _num(_LBL_SL.search(raw))
+
+    if gold_lvl and not _LBL_SL.search(raw):   # v107: label-li postda gold taxmini xalaqit beradi
         toward = bool(_TOWARD_RE.search(raw))
         if toward:
             if gold_lvl not in tps:
@@ -665,6 +821,29 @@ def parse_signal(text: str | None) -> ParsedSignal | None:
         entry = compact_entry
     if compact_entry and (entry is None or (compact_sl and abs(float(entry) - float(compact_sl)) < 1e-6)):
         entry = compact_entry
+    if not tps:
+        _lt = _num(_LBL_TP.search(raw))
+        if _lt:
+            tps = [_lt]
+            tp = _lt
+    # v107: TP faqat pip bilan berilgan bo'lsa (XAUUSD pip = 0.1) narxga o'girish
+    if not tps and entry and direction and symbol and symbol.startswith("XAU"):
+        _pips7 = _collect_pip_tps(raw)
+        if _pips7:
+            _sg7 = 1.0 if direction == "BUY" else -1.0
+            tps = [round(float(entry) + _sg7 * pv * 0.1, 2) for pv in _pips7[:5]]
+            tp = tps[0]
+    # v106: "BUYY.NOW.4422" — yo'nalish qatoridagi kirish narxi
+    if entry is None:
+        _ne6 = _NOW_ENTRY.search(raw)
+        if _ne6:
+            try:
+                _v6 = float(_ne6.group(2).replace(",", "."))
+            except (TypeError, ValueError):
+                _v6 = 0.0
+            _used6 = {float(v) for v in ([sl] + list(tps)) if v}
+            if _v6 and _v6 not in _used6:
+                entry = _v6
     ref = ref_from_text(raw)
     if ref:
         # 28-32 + 4324 → 4328-4332

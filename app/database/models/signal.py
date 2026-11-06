@@ -69,11 +69,36 @@ class Signal(Base):
     explanation: Mapped[str] = mapped_column(Text, default="")
     checks_json: Mapped[str] = mapped_column(Text, default="[]")
 
+    # v81: MANBA — qaysi kanal, qaysi post, qachon tashlangan, asl matn va rasm matni.
+    # (Baza eski bo'lsa ustunlar avtomatik qo'shiladi — _ensure_schema.)
+    source_channel: Mapped[str] = mapped_column(String(160), default="")
+    source_username: Mapped[str] = mapped_column(String(64), default="")
+    source_msg_id: Mapped[int] = mapped_column(Integer, default=0)
+    source_posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    source_ocr: Mapped[str] = mapped_column(Text, default="")
+
+    # v84: KIRISH NUQTASI rejasi (narx kelgandagina savdo ochiladi)
+    entry_mode: Mapped[str] = mapped_column(String(12), default="")     # SIGNAL | COMPUTED
+    entry_status: Mapped[str] = mapped_column(String(12), default="")   # WAIT | FILLED | CANCELLED
+    entry_note: Mapped[str] = mapped_column(String(96), default="")
+    entry_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    entry_skip: Mapped[str] = mapped_column(String(160), default="")
+    entry_tps_src: Mapped[str] = mapped_column(String(12), default="")  # CHANNEL | R345
+    # v109: kanal aytgan BARCHA TP lar (JSON ro'yxat, v110: ko'pi bilan 6 ta).
+    # 2 lot ham eng OXIRGI TP da yopiladi (user qoidasi).
+    tps_extra: Mapped[str] = mapped_column(Text, default="")
+
     # Natija
     result: Mapped[str | None] = mapped_column(String(16), nullable=True)
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

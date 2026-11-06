@@ -2,15 +2,19 @@
 
 Botni kanalga qo'shish shart emas — user akkaunt (Telethon).
 Global NewMessage YO'Q (ulanmagan kanal oqmasin).
-Asosiy: har 8 soniyada poll. Qo'shimcha: listed entity event.
+TEZKOR rejim: yangi xabar kelishi bilan EVENT orqali DARHOL o'qiladi (0 kutish),
+zaxira yo'l — har 2 soniyada poll (sekin internet/blokda ham signal kechikmaydi).
 """
 from __future__ import annotations
 
 import asyncio
 import io
+import time
 from datetime import datetime, timezone
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeuz import hms_tashkent, stamp_tashkent
 from app.database.session import async_session_factory
 from app.services.channel_inbox import ingest_raw, ping_admin
 from app.services.channel_store import (
@@ -24,6 +28,8 @@ from app.services.channel_user import credentials, make_client
 
 logger = get_logger(__name__)
 
+_POLL_SECONDS = 2.0   # v57: tezkor poll (avval 8 s edi)
+
 _client = None
 _task: asyncio.Task | None = None
 _stop = False
@@ -34,21 +40,144 @@ _status: dict = {
     "authorized": False,
     "account": "",
     "last_poll": "",
+    "last_poll_local": "",
     "last_error": "",
     "seen": 0,
     "signals": 0,
     "channels_ok": [],
     "channels_fail": [],
     "recent": [],
+    "poll_seconds": _POLL_SECONDS,
 }
+
+
+# --------------------------------------------------------------------------- #
+#  v93: YETAKCHI QULFI — Telegram sessiyasi FAQAT BITTA jarayondan ishlatiladi
+# --------------------------------------------------------------------------- #
+# Nega: Render yangi versiyani ishga tushirganda ESLI nusxa ham bir necha
+# sekund/yuzlab sekund ishlab turadi. Ikkala nusxa BITTA Telegram sessiyasi
+# bilan ulansa, Telegram buni shubhali deb topadi va sessiyani BEKOR QILADI —
+# shu sababli har yangilanishdan keyin "akkaunt chiqib ketardi". Endi faqat
+# qulfni ushlab turgan nusxa ulanadi; ikkinchisi kutadi.
+LEADER_COMPONENT = "tg_leader"
+LEADER_TTL_S = 120.0        # yurak urishi shuncha sekunddan eski bo'lsa qulf bo'sh
+LEADER_RENEW_S = 30.0       # qulfni yangilash oralig'i
+
+
+def _owner_id() -> str:
+    import os
+    import socket
+    try:
+        host = socket.gethostname()
+    except Exception:  # noqa: BLE001
+        host = "host"
+    return f"{host}:{os.getpid()}"
+
+
+async def _leader_read() -> dict:
+    try:
+        from app.services.channel_store import load_json_log
+        async with async_session_factory() as db:
+            row = await load_json_log(db, LEADER_COMPONENT)
+        return dict(row or {})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[CH-WATCH] qulf o'qilmadi: %s", exc)
+        return {}
+
+
+async def _leader_write(owner: str) -> None:
+    try:
+        from app.services.channel_store import save_json_log
+        async with async_session_factory() as db:
+            await save_json_log(db, LEADER_COMPONENT,
+                                {"owner": owner, "ts": time.time(),
+                                 "since": time.time()})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CH-WATCH] qulf yozilmadi: %s", exc)
+
+
+async def acquire_leader(owner: str) -> tuple[bool, str]:
+    """Qulfni olish. (True, "") bo'lsa ulanish mumkin; aks holda (False, sabab)."""
+    row = await _leader_read()
+    cur = str(row.get("owner") or "")
+    ts = float(row.get("ts") or 0.0)
+    age = time.time() - ts if ts else 1e9
+    if cur and cur != owner and age < LEADER_TTL_S:
+        return False, (f"boshqa nusxa faol ({cur}, {int(age)} s oldin yangilangan) "
+                       "— sessiya ikki joydan ishlatilmasin")
+    await _leader_write(owner)
+    return True, ""
+
+
+async def renew_leader(owner: str) -> bool:
+    """Qulfni yangilaydi; boshqasi egallab olgan bo'lsa False."""
+    row = await _leader_read()
+    cur = str(row.get("owner") or "")
+    if cur and cur != owner:
+        ts = float(row.get("ts") or 0.0)
+        if time.time() - ts < LEADER_TTL_S:
+            return False
+    await _leader_write(owner)
+    return True
+
+
+async def release_leader(owner: str) -> None:
+    row = await _leader_read()
+    if str(row.get("owner") or "") == owner:
+        try:
+            from app.services.channel_store import save_json_log
+            async with async_session_factory() as db:
+                await save_json_log(db, LEADER_COMPONENT, {"owner": "", "ts": 0.0})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _leader_loop(owner: str) -> None:
+    """Ulangan paytda qulfni har 30 s da yangilab turadi."""
+    while not _stop and _client is not None:
+        await asyncio.sleep(LEADER_RENEW_S)
+        try:
+            ok = await renew_leader(owner)
+        except Exception:  # noqa: BLE001
+            ok = True
+        if not ok:
+            logger.warning("[CH-WATCH] qulf boshqa nusxaga o'tdi — uzilamiz")
+            _note("qulf boshqa nusxada — bu nusxa uzildi")
+            try:
+                if _client is not None:
+                    await _client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
+def get_client():
+    """Faol Telethon klienti (yozib olish/dump uchun)."""
+    return _client
 
 
 def get_status() -> dict:
     return dict(_status)
 
 
+_last_note_msg = ""
+_last_note_at = 0.0
+_last_note_repeat = 0
+
+
 def _note(msg: str) -> None:
-    line = f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {msg}"
+    """Holat qatori — TO'SHKENT vaqti bilan; bir xil satr 60 s ichida takrorlanmaydi."""
+    global _last_note_msg, _last_note_at, _last_note_repeat
+    now = time.monotonic()
+    if msg == _last_note_msg and (now - _last_note_at) < 60:
+        _last_note_repeat += 1
+        _last_note_at = now
+        return
+    extra = f" (yuqoridagi {_last_note_repeat} marta takrori yashirildi)" if _last_note_repeat else ""
+    _last_note_msg = msg
+    _last_note_at = now
+    _last_note_repeat = 0
+    line = f"{hms_tashkent()} {msg}{extra}"
     rec = list(_status.get("recent") or [])
     rec.insert(0, line)
     _status["recent"] = rec[:24]
@@ -169,6 +298,7 @@ async def _process_msg(msg, ch: dict) -> None:
         msg_id=mid, chat_id=chat_id, title=title, username=username,
         notify_verdict=False, grouped_id=gid, reply_to=reply_to,
         require_listed=True,
+        posted_at=getattr(msg, "date", None),   # v81: post qachon tashlangan
     )
     async with async_session_factory() as session:
         await touch_channel(
@@ -230,7 +360,13 @@ async def _poll_once(client) -> None:
         _status["channels_ok"] = []
         _status["channels_fail"] = []
         _status["last_poll"] = datetime.now(timezone.utc).isoformat()
+        _status["last_poll_local"] = stamp_tashkent()
         return
+    catchup_n = 0
+    try:
+        catchup_n = int(getattr(get_settings(), "channel_catchup_count", 0) or 0)
+    except Exception:  # noqa: BLE001
+        catchup_n = 0
     for ch in channels:
         entity = await _resolve(client, ch)
         if entity is None:
@@ -250,16 +386,16 @@ async def _poll_once(client) -> None:
                     break
                 batch.append(msg)
             batch.reverse()
-            n_new = 0
-            for msg in batch:
-                await _process_msg(msg, ch)
-                n_new += 1
-            if n_new:
-                _note(f"yangi {n_new} ta {display_name(ch)}")
-            elif first and last <= 0:
+
+            if not last:
+                # v56: bu kanalda suv belgisi yo'q (yangi ulandi) — TARIX O'QILMAYDI.
+                # Aks holda bot 25 ta eski postni "signal" deb qayta ishlab yuborardi.
                 newest = 0
                 for m in batch:
                     newest = max(newest, int(getattr(m, "id", 0) or 0))
+                if catchup_n > 0 and batch:
+                    for msg in batch[-catchup_n:]:
+                        await _process_msg(msg, ch)
                 if newest:
                     async with async_session_factory() as session:
                         await touch_channel(
@@ -269,7 +405,26 @@ async def _poll_once(client) -> None:
                             last_msg_id=newest,
                         )
                     ch["last_msg_id"] = newest
-                    _note(f"watermark {display_name(ch)} #{newest}")
+                _note(f"suv belgisi {display_name(ch)} #{newest} "
+                      f"(tarix o'qilmadi: {len(batch)} ta eski xabar)")
+                if key:
+                    _catchup.add(key)
+                continue
+
+            n_new = 0
+            for msg in batch:
+                # v128-STALE: 1 soatdan eski xabarlar qayta ulanishda signal qilinmaydi
+                msg_dt = getattr(msg, "date", None)
+                if msg_dt is not None:
+                    _now_w = datetime.now(timezone.utc)
+                    if getattr(msg_dt, "tzinfo", None) is None:
+                        msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                    if (_now_w - msg_dt).total_seconds() > 3600.0:
+                        continue
+                await _process_msg(msg, ch)
+                n_new += 1
+            if n_new:
+                _note(f"yangi {n_new} ta {display_name(ch)}")
             if key:
                 _catchup.add(key)
         except Exception as exc:  # noqa: BLE001
@@ -279,6 +434,7 @@ async def _poll_once(client) -> None:
     _status["channels_ok"] = ok
     _status["channels_fail"] = fail
     _status["last_poll"] = datetime.now(timezone.utc).isoformat()
+    _status["last_poll_local"] = stamp_tashkent()
 
 
 async def _on_listed(event) -> None:
@@ -296,6 +452,14 @@ async def _on_listed(event) -> None:
             ch = await match_channel(session, chat_id=chat_id, username=username)
         if ch is None:
             return
+        # v128-STALE: 1 soatdan eski postlar qabul qilinmaydi
+        msg_dt = getattr(msg, "date", None)
+        if msg_dt is not None:
+            _now_w = datetime.now(timezone.utc)
+            if getattr(msg_dt, "tzinfo", None) is None:
+                msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+            if (_now_w - msg_dt).total_seconds() > 3600.0:
+                return
         await _process_msg(msg, ch)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[CH-WATCH] event: %s", exc)
@@ -319,6 +483,16 @@ async def _run() -> None:
                 )
             await asyncio.sleep(45)
             continue
+        # v93: avval qulfni olamiz (ikki nusxa bir sessiyani ishlatmasin)
+        _own = _owner_id()
+        _got, _why = await acquire_leader(_own)
+        if not _got:
+            _status["authorized"] = False
+            _note(_why)
+            _status["last_error"] = _why
+            logger.info("[CH-WATCH] %s", _why)
+            await asyncio.sleep(30)
+            continue
         try:
             from telethon import events
             client = make_client(session, int(api_id), api_hash)
@@ -326,6 +500,20 @@ async def _run() -> None:
             if not await client.is_user_authorized():
                 _status["authorized"] = False
                 _note("sessiya yaroqsiz — /akkaunt")
+                if not _alerted:
+                    _alerted = True
+                    await ping_admin(
+                        "\u26A0\uFE0F <b>Telegram akkaunt sessiyasi o'chgan.</b>\n"
+                        "Telegram uni bekor qilgan (chiqib ketgan) — kanallar o'qilmayapti.\n"
+                        "Tuzatish: <b>/qr</b> (yoki <b>/akkaunt</b>) — bir marta ulang.\n\n"
+                        "<b>SABAB (v93 da tuzatildi):</b> sessiya bir vaqtda IKKI joydan\n"
+                        "ishlatilgan bo'lsa Telegram uni o'chiradi. Endi bot qulf ishlatadi:\n"
+                        "yangi versiya chiqqanda faqat BITTA nusxa ulanadi.\n"
+                        "Shuning uchun botni kompyuterda va Render'da BIR VAQTDA\n"
+                        "ishlatmang — kanallar o'qilmay qoladi."
+                    )
+                    logger.warning("[CH-WATCH] sessiya o'chgan — adminga xabar berildi")
+                await release_leader(_own)
                 await client.disconnect()
                 await asyncio.sleep(90)
                 continue
@@ -359,16 +547,36 @@ async def _run() -> None:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("[CH-WATCH] poll: %s", exc)
                         _status["last_error"] = str(exc)[:200]
-                    await asyncio.sleep(8)
+                        # v101: kalit duplikati — tashqi loop qayta ulaydi
+                        if "AuthKey" in type(exc).__name__:
+                            logger.error("[CH-WATCH] v101 AuthKey — reconnect")
+                            try:
+                                await client.disconnect()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            break
+                    # v57: TEZKOR rejim — 2 s (bozor tez, kechikish xavf)
+                    await asyncio.sleep(_POLL_SECONDS)
 
             poll_task = asyncio.create_task(_poll_loop(), name="ch-poll")
+            lead_task = asyncio.create_task(_leader_loop(_own), name="ch-leader")
             try:
                 await client.run_until_disconnected()
+            except Exception as exc:  # noqa: BLE001
+                # v101: aloqa uzilsa ham task o'lmaydi — tashqi loop qayta ulaydi
+                logger.warning("[CH-WATCH] v101 aloqa uzildi: %s — qayta "
+                               "ulanaman", type(exc).__name__)
             finally:
                 poll_task.cancel()
+                lead_task.cancel()
+                for _t in (poll_task, lead_task):
+                    try:
+                        await _t
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
                 try:
-                    await poll_task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    await release_leader(_own)
+                except Exception:  # noqa: BLE001
                     pass
             _client = None
         except Exception as exc:  # noqa: BLE001
@@ -376,3 +584,32 @@ async def _run() -> None:
             _status["last_error"] = str(exc)[:200]
             _client = None
             await asyncio.sleep(20)
+
+
+async def sync_watermarks_to_latest() -> int:
+    """v128: Barcha kanallardagi suv belgisini oxirgi xabarga suradi (tarix o'qilmaydi)."""
+    cnt = 0
+    if _client is None or not _client.is_connected():
+        return 0
+    async with async_session_factory() as session:
+        channels = await list_channels(session)
+    for ch in channels:
+        try:
+            ent = await _resolve(_client, ch)
+            if ent is None:
+                continue
+            async for m in _client.iter_messages(ent, limit=1):
+                if m and getattr(m, "id", None):
+                    newest = int(m.id)
+                    async with async_session_factory() as s:
+                        await touch_channel(
+                            s, username=ch.get("username"),
+                            chat_id=ch.get("chat_id"),
+                            title=ch.get("title") or "",
+                            last_msg_id=newest,
+                        )
+                    cnt += 1
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CH-WATCH] sync_watermark: %s", exc)
+    return cnt

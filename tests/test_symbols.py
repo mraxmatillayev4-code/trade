@@ -15,7 +15,7 @@ def test_pair_display():
 
 def test_coin_name():
     assert coin_name("SOLUSDT") == "Solana"
-    assert coin_name("BTCUSDT") == "Bitcoin"
+    assert coin_name("BTCUSDT") == "Bitcoin (BTC/USD)"
     assert coin_name("ETHUSDT") == "Ethereum"
     assert coin_name("DOGEUSDT") == "Dogecoin"
 

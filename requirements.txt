@@ -3,6 +3,8 @@ aiogram==3.13.1
 aiohttp>=3.10.5
 telethon>=1.36.0
 pillow>=10.4.0
+# /qr buyrug'i uchun QR rasm (PNG)
+qrcode>=7.4.2
 pytesseract>=0.3.13
 
 # === Web API ===
@@ -33,3 +35,4 @@ python-dotenv>=1.0.1
 # === Tests ===
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
+metaapi-cloud-sdk>=28.0.0

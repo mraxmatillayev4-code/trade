@@ -32,6 +32,9 @@ class PaperAccount(Base):
     total_trades: Mapped[int] = mapped_column(Integer, default=0)
     total_wins: Mapped[int] = mapped_column(Integer, default=0)
 
+    # v82: risk/money management — shu hisob uchun risk foizi (0.5 / 1 / 2)
+    risk_percent: Mapped[float] = mapped_column(Float, default=0.5)
+
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"
@@ -63,8 +66,15 @@ class PaperPosition(Base):
     balance_before: Mapped[float] = mapped_column(Float)
     balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # v92: HISOB 3 GA BO'LINDI — bu lot qaysi hisobga tegishli:
+    # "KANAL" = kanaldan olingan signal, "OZI" = bot o'zi topgan signal.
+    # (Eski lotlarda bo'sh — signal manbasidan avtomatik aniqlanadi.)
+    bucket: Mapped[str] = mapped_column(String(8), default="", index=True)
+
     stage: Mapped[int] = mapped_column(Integer, default=0)  # 0 ochiq, 1 tp1, 2 tp2, 3 yopildi
     sl_moved_to_be: Mapped[bool] = mapped_column(default=False)
+    # Nima uchun yopildi: TP1/TP3/TP5 | SL | VAQT TUGADI | BEKOR
+    close_reason: Mapped[str] = mapped_column(String(24), default="")
 
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

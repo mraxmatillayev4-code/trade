@@ -18,7 +18,7 @@ async def test_full_pipeline_creates_signal(uptrend_df, settings):
         await seed_db(session)
 
     # Tahlil
-    decision, bundle = await signal_engine.analyze(uptrend_df, "15m", settings)
+    decision, bundle = signal_engine.analyze(uptrend_df, "15m", settings)
     assert decision.direction in (Direction.BUY, Direction.SELL, Direction.NEUTRAL)
 
     if decision.passes_threshold:

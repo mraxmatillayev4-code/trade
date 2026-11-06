@@ -6,8 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /code
 
+# v88: tesseract + INGLIZ va RUS tillari (kanallar shu tillarda yozadi).
+# Rus tili o'rnatilmasa ham bot ishlaydi (faqat eng bilan o'qiydi).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && (apt-get install -y --no-install-recommends tesseract-ocr-rus || true) \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

@@ -1,11 +1,31 @@
 """Statistika hisob-kitoblari (signallar asosida)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.signal import Signal, SignalConfirmation
 from app.database.models.stats import StrategyStat
+
+# O'zbekiston mahalliy vaqti (UTC+5) — kunlik raqamlash shu taqvimda
+_LOCAL_TZ = timezone(timedelta(hours=5))
+
+
+async def daily_signal_count(session: AsyncSession) -> int:
+    """v109 (TALAB): signal raqami HAR KUNI 1 dan boshlanadi.
+
+    Bugungi (Toshkent kuni) yaratilgan signallar sonini qaytaradi —
+    yangi signal raqami = bu qiymat + 1.
+    """
+    now_local = datetime.now(_LOCAL_TZ)
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = midnight_local.astimezone(timezone.utc)
+    cnt = await session.scalar(
+        select(func.count(Signal.id)).where(Signal.created_at >= start_utc)
+    )
+    return int(cnt or 0)
 
 
 def _max_drawdown(rs: list[float]) -> float:

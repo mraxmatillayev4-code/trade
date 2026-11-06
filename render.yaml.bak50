@@ -1,0 +1,33 @@
+# Render free tier deployment blueprint
+# Render Dashboard → New → Blueprint → ushbu repozitoriyni tanlang.
+# Free web service: bot + scheduler + WebSocket + FastAPI bitta jarayonda.
+services:
+  - type: web
+    name: trading-signal-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m app.main all
+    healthCheckPath: /health
+    autoDeploy: true
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: trading-bot-db
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      - key: PORT
+        value: 8000
+      - key: LOG_LEVEL
+        value: INFO
+
+databases:
+  - name: trading-bot-db
+    plan: free
+    databaseName: trading_bot
+    user: trader

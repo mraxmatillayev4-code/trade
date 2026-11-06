@@ -36,6 +36,7 @@ class BinanceWebSocket:
         self._on_error = on_error
         self._task: asyncio.Task | None = None
         self._running = False
+        self._session: aiohttp.ClientSession | None = None
 
         def _root(u: str) -> str:
             # Combined stream URL bazada /ws BO'LMAYDI: <host>/stream?streams=...
@@ -53,9 +54,26 @@ class BinanceWebSocket:
         self._task = asyncio.create_task(self._run_loop(), name="binance-ws")
 
     async def stop(self) -> None:
+        """v86: taskni BEKOR qilib, TUGASHINI KUTAMIZ — aks holda aiohttp
+        sessiyasi yopilmay "Unclosed client session" xatosi chiqadi."""
         self._running = False
-        if self._task:
-            self._task.cancel()
+        task = self._task
+        self._task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[WS] stop: %s", exc)
+        session = self._session
+        self._session = None
+        if session is not None and not session.closed:
+            try:
+                await session.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[WS] sessiya yopilmadi: %s", exc)
 
     def _build_url(self, base: str) -> str:
         streams = []
@@ -76,6 +94,7 @@ class BinanceWebSocket:
         consecutive = 0
         base_idx = 0
         async with aiohttp.ClientSession() as session:
+            self._session = session
             while self._running:
                 base = self._bases[base_idx % len(self._bases)]
                 try:

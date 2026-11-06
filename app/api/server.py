@@ -9,10 +9,11 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeuz import to_tashkent
 from app.core.security import verify_webhook_signature
 from app.database import crud
 from app.database.models.backtest import Backtest
-from app.database.session import async_session_factory, init_db
+from app.database.session import async_session_factory
 from app.database.seed import seed_db
 from app.market.binance_rest import BinanceRest
 from app.services.statistics import overall_statistics, strategy_statistics
@@ -28,6 +29,23 @@ class WebhookPayload(BaseModel):
     secret: str | None = None
 
 
+class BrkToken(BaseModel):
+    """v74: ko'prik chaqiruvlari uchun token."""
+    token: str = ""
+
+
+class BrkAck(BrkToken):
+    results: list[dict] = []
+
+
+class BrkReport(BrkToken):
+    balance: float | None = None
+    equity: float | None = None
+    positions: list[dict] | None = None
+    bridge_ver: str | None = None
+    error: str | None = None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Trading Signal Bot API", version="1.0.0")
     settings = get_settings()
@@ -36,9 +54,21 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        await init_db()
-        async with async_session_factory() as session:
-            await seed_db(session)
+        """v87: baza yo'q bo'lsa ham API KO'TARILADI (port ochiq qoladi).
+
+        Ilgari `init_db()` xatosi butun jarayonni yiqitardi:
+        «Application startup failed. Exiting» + Render'da port topilmasdi.
+        Endi xato sababini aytamiz (Telegramga ham) va ishlashda davom etamiz —
+        bot ishlaydi, /health javob beradi.
+        """
+        from app.services import dbhealth
+        await dbhealth.safe_startup(notifier=getattr(app.state, "notifier", None))
+        try:
+            async with async_session_factory() as session:
+                await seed_db(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[API] seed: %s: %s", type(exc).__name__, exc)
+        logger.info("%s", dbhealth.target_line())
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -47,7 +77,52 @@ def create_app() -> FastAPI:
     @app.get("/")
     @app.api_route("/health", methods=["GET", "HEAD"])
     async def health() -> dict:
-        return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+        """v87: `/health` — bot tirikmi va baza holati (brauzerda ham ko'rinadi)."""
+        from app.services import dbhealth
+        try:
+            from app.services import local_ai as _lai
+            ver = _lai.__version__
+        except Exception:  # noqa: BLE001
+            ver = "?"
+        return {"status": "ok", "version": ver, "db": dbhealth.status_plain(),
+                "db_target": dbhealth.db_target().get("host") or "",
+                "time": to_tashkent().isoformat()}
+
+    from app.services import broker as _brk
+
+    @app.post("/api/broker/pull")
+    async def broker_pull(payload: BrkToken) -> dict:
+        """Ko'prik (kompyuter) navbatni oladi: ochish/yopish buyruqlari."""
+        async with async_session_factory() as session:
+            return await _brk.pull(session, payload.token)
+
+    @app.post("/api/broker/ack")
+    async def broker_ack(payload: BrkAck) -> dict:
+        """Ko'prik natijani qaytaradi: ticket / narx / xato."""
+        async with async_session_factory() as session:
+            return await _brk.ack(session, payload.token, payload.results)
+
+    @app.post("/api/broker/report")
+    async def broker_report(payload: BrkReport) -> dict:
+        """Ko'prik hisob holatini yuboradi (balans, equity, pozitsiyalar)."""
+        async with async_session_factory() as session:
+            return await _brk.report(
+                session, payload.token, balance=payload.balance, equity=payload.equity,
+                positions=payload.positions, bridge_ver=payload.bridge_ver,
+                error=payload.error,
+            )
+
+    @app.post("/api/broker/status")
+    async def broker_status(payload: BrkToken) -> dict:
+        """Holat (token bilan) — ko'prik va bot bir xil ma'lumotni ko'radi."""
+        async with async_session_factory() as session:
+            cfg = await _brk.load_cfg(session)
+            if not _brk.is_ready(cfg) or payload.token != cfg.get("token"):
+                return {"ok": False, "error": "token noto'g'ri"}
+            data = await _brk.summary(session)
+            data.pop("password", None)
+            return {"ok": True, "cfg": data,
+                    "state": _brk.link_state(cfg)}
 
     @app.get("/api/signals")
     async def list_signals(limit: int = 20, direction: str | None = None) -> list[dict]:
